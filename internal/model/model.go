@@ -151,6 +151,25 @@ func NormalizeDomain(raw string) string {
 	return strings.TrimSpace(s)
 }
 
+// SameDomain 判断两个域名是不是「同一个网站」——忽略前导 www.。
+//
+// 备案是按主域名登记的，`www.qq.com` 和 `qq.com` 是同一条备案。上游返回的
+// domain 字段通常不带 www.，所以「按域名精确比对结果」的适配器（miit 就是）
+// 必须用这个函数，否则查 `www.qq.com` 时会把唯一命中的记录丢掉，
+// 一个已经备案的域名被判成「未备案」——比报错更糟，因为它看起来像结论。
+func SameDomain(a, b string) bool {
+	return trimWWW(NormalizeDomain(a)) == trimWWW(NormalizeDomain(b))
+}
+
+// trimWWW 去掉前导 www.，但保留 `www.com` 这种本身就是注册域名的情况。
+func trimWWW(d string) string {
+	rest := strings.TrimPrefix(d, "www.")
+	if rest == d || !strings.Contains(rest, ".") {
+		return d
+	}
+	return rest
+}
+
 // IsValidDomain 做语法校验。
 func IsValidDomain(d string) bool {
 	if len(d) < 4 || len(d) > 253 {

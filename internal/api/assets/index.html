@@ -119,6 +119,7 @@
         <div class="panel-title">
           <span>监控域名</span>
           <span class="pill" id="w-total">–</span>
+          <button class="pill err-pill" id="w-bad" type="button" hidden>–</button>
           <span class="pill" id="w-rhythm" title="巡检节奏">–</span>
         </div>
         <div class="panel-acts">
@@ -149,6 +150,16 @@
           <span class="pill" id="c-total">–</span>
         </div>
         <div class="panel-acts">
+          <label class="sel">
+            <select id="c-kind" title="只看某一类事件">
+              <option value="">全部类型</option>
+              <option value="changed">变更</option>
+              <option value="revoked">注销</option>
+              <option value="registered">新增</option>
+              <option value="upstream_error">上游异常</option>
+              <option value="recovered">已恢复</option>
+            </select>
+          </label>
           <button class="ghost small" id="c-refresh" type="button">刷新</button>
         </div>
       </div>

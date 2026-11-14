@@ -80,12 +80,12 @@ func (l *rateLimiter) allow(ip string) bool {
 func (s *Server) clientIP(r *http.Request) string {
 	if s.cfg.TrustProxy {
 		if v := r.Header.Get("X-Forwarded-For"); v != "" {
-			if ip := lastHop(v); ip != "" {
+			if ip := validHop(lastHop(v)); ip != "" {
 				return ip
 			}
 		}
-		if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
-			return v
+		if ip := validHop(r.Header.Get("X-Real-IP")); ip != "" {
+			return ip
 		}
 	}
 	// 不再单独采信 CF-Connecting-IP。
@@ -112,6 +112,31 @@ func lastHop(v string) string {
 	for i := len(parts) - 1; i >= 0; i-- {
 		if ip := strings.TrimSpace(parts[i]); ip != "" {
 			return ip
+		}
+	}
+	return ""
+}
+
+// validHop 只接受「真的像个地址」的值，其余一律当没有。
+//
+// 取末段之后还剩一个口子：末段本身是字符串，不是 IP。`X-Real-IP` 更是完全
+// 没校验过。于是每个请求带一个不同的乱码值，就是一桶新的限流令牌——限流又
+// 白开了；更糟的是这些值会原样成为 limiter 那个 map 的 key，随请求量无界增长，
+// 鼓包两百字节一个 key，发几十万个请求就把内存吃干净。它们还会进访问日志。
+//
+// 反向代理写进来的 `$remote_addr` 永远是 IP，所以「不是 IP 就不认」不会误伤
+// 任何正常部署。带端口的写法（`1.2.3.4:5678`、`[::1]:80`）也接受。
+func validHop(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > 64 {
+		return ""
+	}
+	if ip := net.ParseIP(v); ip != nil {
+		return ip.String()
+	}
+	if host, _, err := net.SplitHostPort(v); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
 		}
 	}
 	return ""

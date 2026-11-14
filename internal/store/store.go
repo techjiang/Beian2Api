@@ -881,12 +881,33 @@ var ErrStop = errors.New("stop iteration")
 //
 // fn 返回 ErrStop 时立即结束遍历且不算错误。
 func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error)) error {
+	_, err := s.PageChanges(limit, 0, fn)
+	return err
+}
+
+// PageChanges 在 ListChanges 之上加一层「跳过前 offset 条」的能力，并返回本页内容。
+//
+// 首页的「最近变更」原来是死的：只显示最近 10 条，没有任何翻页或筛选入口。
+// 变更流水攒到几百条之后，第 11 条以前的事实在界面上彻底不可见，只能自己
+// curl。滚动记录的意义就是能往前翻，翻不动等于没有。
+//
+// offset 数的是「已被 fn 判定保留的记录」，所以它和 ?since= 各管一段：
+// since 是增量游标（读到早于游标的记录就整体结束遍历），offset 是翻页游标。
+//
+// 返回值是这个 store 方法唯一的产出方式：fn 只负责「这条要不要」，
+// 不负责收集。让 fn 顺手 append 会掉进一个很隐蔽的坑——跳过发生在
+// fn 之后，被跳过的记录其实已经进过一次结果集了，翻页会翻出重复的内容。
+func (s *Store) PageChanges(limit, offset int, fn func(raw []byte) (keep bool, err error)) ([][]byte, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	return s.db.View(func(tx *bolt.Tx) error {
+	if offset < 0 {
+		offset = 0
+	}
+	var out [][]byte
+	err := s.db.View(func(tx *bolt.Tx) error {
 		c := tx.Bucket(bucketChanges).Cursor()
-		n := 0
+		skipped := 0
 		for k, v := c.Last(); k != nil; k, v = c.Prev() {
 			keep, err := fn(v)
 			if errors.Is(err, ErrStop) {
@@ -898,13 +919,18 @@ func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error
 			if !keep {
 				continue
 			}
-			n++
-			if n >= limit {
-				break
+			if skipped < offset {
+				skipped++
+				continue
+			}
+			out = append(out, append([]byte(nil), v...))
+			if len(out) >= limit {
+				return nil
 			}
 		}
 		return nil
 	})
+	return out, err
 }
 
 // PutNotifyState 保存某个推送通道的最近投递状态。

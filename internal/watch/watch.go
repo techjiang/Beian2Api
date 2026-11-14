@@ -318,6 +318,14 @@ func (w *Watcher) onSuccess(it *store.WatchItem, res *model.Result, prev *model.
 	if it.LastFP == "" {
 		it.LastFP = fp
 		_, _ = w.st.UpdateWatchIfExists(it)
+		// 首次拿到数据只建基线，不凭空报一条变更——但「刚恢复」不是变更，是状态回正。
+		//
+		// 之前这里无条件 return：域名在「上游挂着」的时候加入监控，连续失败告警
+		// 已经推出去了，等上游恢复，这条「已恢复」被建基线分支吞掉，群里最后
+		// 一条消息永远停在「挂了」。而这恰恰是通知链路最该闭环的地方。
+		if recovered {
+			return w.recoveredChange(it, streak, now)
+		}
 		return Change{}, false
 	}
 	if it.LastFP == fp {
@@ -358,6 +366,10 @@ func (w *Watcher) onAbsent(it *store.WatchItem, prev *model.Record, recovered bo
 		it.LastFP = fpAbsent
 		it.LastICP = ""
 		_, _ = w.st.UpdateWatchIfExists(it)
+		// 同上：这条路径也可能是一次「刚恢复」，恢复事件不能在这里丢掉。
+		if recovered {
+			return w.recoveredChange(it, streak, now)
+		}
 		return Change{}, false
 	}
 	if it.LastFP == fpAbsent {

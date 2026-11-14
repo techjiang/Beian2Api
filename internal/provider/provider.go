@@ -224,11 +224,23 @@ drain:
 				out.Source, out.Records = notFoundFrom, []model.Record{}
 				decided = true
 			}
-			continue
+			// 结论已定就收工，不再等剩下的源。
+			//
+			// 之前这里是 continue，循环条件又是「收满 len(tasks) 个回复」，
+			// 于是决定虽然做完了，人还是站在那儿等慢源。有数据的那一支侥幸
+			// 没事（cancel() 会让其余源立刻返回），而「无备案」这一支没有
+			// cancel：三个源里最快的那个 10ms 就答了「查不到」，最慢的那个
+			// 挂到超时才回，这 800ms 的宽限就变成了最长那个源的超时时间。
+			// 配置里单源超时 8 秒，一次「查不到」的查询就要 8 秒。
+			//
+			// 不再收也不会漏东西：ch 的缓冲是 len(tasks)，没被读走的回复
+			// 照样能写出去，goroutine 不会卡住。
+			break drain
 		case r = <-ch:
 		}
 		if decided {
-			continue
+			// 有数据的那一支：cancel() 已经通知其余源收工，这里同样直接返回。
+			break drain
 		}
 		switch {
 		case r.err == nil && len(r.records) > 0:

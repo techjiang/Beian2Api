@@ -186,11 +186,20 @@ func (m *MIIT) Lookup(ctx context.Context, domain string) ([]model.Record, error
 	out := make([]model.Record, 0, len(qr.Params.List))
 	for _, it := range qr.Params.List {
 		// unitName 是模糊匹配，只保留真正命中的域名。
-		if model.NormalizeDomain(it.Domain) != domain {
+		// 比对要忽略 www.：备案按主域名登记，上游回的 domain 一般不带 www.，
+		// 而用户很可能查的是 `www.example.com`。用 == 精确比会把它丢掉，
+		// 于是这条命中记录被过滤成空列表 → 返回 ErrNotFound → 一个已备案的
+		// 域名被判成「未备案」，还带着 10 分钟的负缓存。
+		if !model.SameDomain(it.Domain, domain) {
 			continue
 		}
 		r := model.Record{
-			Domain:    it.Domain,
+			// Domain 一律落成「用户查的那个域名」，不用上游回显的那个。
+			// 历史快照是按 Record.Domain 做 key 的（AppendHistory），而缓存、
+			// 监控、巡检用的都是查询域名；两边不一致时，历史会在另一个 key 下
+			// 悄悄写一份，巡检去读自己那个 key 永远读到空——「查看历史」空白，
+			// 而磁盘上明明有数据。
+			Domain:    domain,
 			UnitName:  firstNonEmpty(it.UnitName, it.LeaderName),
 			UnitType:  cleaner(it.UnitType),
 			SiteName:  firstNonEmpty(it.ServiceName),

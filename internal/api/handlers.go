@@ -14,6 +14,7 @@ import (
 	"github.com/asoe/beian2api/internal/model"
 	"github.com/asoe/beian2api/internal/service"
 	"github.com/asoe/beian2api/internal/store"
+	"github.com/asoe/beian2api/internal/watch"
 )
 
 // handleQuery 处理单域名查询。
@@ -276,6 +277,13 @@ func (s *Server) handleWatchRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), window)
 	defer cancel()
 	changes := s.watch.RunOnce(ctx)
+	// 没有变更时也要给 []，不能是 null。
+	// 调用方写 `data.changes.length` / `for ... of data.changes` 是常规写法，
+	// 而 JSON 的 null 到 JS 里是 null，`.length` 直接 TypeError。
+	// 一个「什么都没发生」的正常结果，不该让客户端抛异常。
+	if changes == nil {
+		changes = []watch.Change{}
+	}
 	writeOK(w, map[string]any{"changes": changes, "count": len(changes)})
 }
 

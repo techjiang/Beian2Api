@@ -30,8 +30,29 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var out []watch.Change
-	err = s.svc.Store().ListChanges(limit, func(raw []byte) (bool, error) {
+	offset := 0
+	if v := strings.TrimSpace(r.URL.Query().Get("offset")); v != "" {
+		n, convErr := strconv.Atoi(v)
+		if convErr != nil || n < 0 {
+			writeErr(w, http.StatusBadRequest, "invalid_offset", fmt.Sprintf("offset 必须是非负整数，收到 %q", v))
+			return
+		}
+		offset = n
+	}
+	// kind 让调用方按类型取（只看注销、只看上游异常）。
+	// 之前只能把流水全拉下来自己过滤，而流水本身是有截断的：
+	// 「只看注销」在末尾几条里找不到时，界面上就是一片空白，
+	// 用户没法知道是「真的没有」还是「没翻到」。
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	if kind != "" && !knownKind(kind) {
+		writeErr(w, http.StatusBadRequest, "invalid_kind",
+			fmt.Sprintf("kind 只能是 changed / revoked / registered / upstream_error / recovered，收到 %q", kind))
+		return
+	}
+
+	// 多要一条用来判断「后面还有没有」：这样不必为了算总数把整条流水
+	// 反序列化一遍（那是每 60 秒一次的轮询接口）。
+	raws, err := s.svc.Store().PageChanges(limit+1, offset, func(raw []byte) (bool, error) {
 		var c watch.Change
 		if json.Unmarshal(raw, &c) != nil {
 			return false, nil
@@ -43,17 +64,44 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			// 没有早停的话每次都要把整个流水反序列化一遍。
 			return false, store.ErrStop
 		}
-		out = append(out, c)
+		if kind != "" && c.Kind != kind {
+			return false, nil
+		}
 		return true, nil
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	hasMore := len(raws) > limit
+	if hasMore {
+		raws = raws[:limit]
+	}
+	out := make([]watch.Change, 0, len(raws))
+	for _, raw := range raws {
+		var c watch.Change
+		if json.Unmarshal(raw, &c) == nil {
+			out = append(out, c)
+		}
+	}
 	if out == nil {
 		out = []watch.Change{}
 	}
-	writeOK(w, map[string]any{"total": len(out), "items": out})
+	// total 仍然是「本次返回的条数」，保持老调用方不用改；
+	// 翻页信息放在 offset / limit / has_more 三个字段里。
+	writeOK(w, map[string]any{
+		"total": len(out), "items": out,
+		"offset": offset, "limit": limit, "has_more": hasMore,
+	})
+}
+
+// knownKind 是变更事件的合法类型，与 watch / notify 的常量保持一致。
+func knownKind(k string) bool {
+	switch k {
+	case "changed", "revoked", "registered", "upstream_error", "recovered":
+		return true
+	}
+	return false
 }
 
 // handleRSS 把变更事件输出成 RSS 2.0，可直接丢进 RSS 阅读器或 IM 的订阅机器人。

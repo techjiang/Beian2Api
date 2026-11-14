@@ -122,7 +122,7 @@ curl "http://localhost:8080/api/v1/query?domain=example.com"
 | GET | `/api/v1/watch/list` | 巡检列表 |
 | GET | `/api/v1/watch/status` | 巡检运行概况（是否在跑 / 上次 / 下次），分页 |
 | POST | `/api/v1/watch/run` | 立即执行一轮巡检 |
-| GET | `/api/v1/changes` | 变更事件流水（含注销、上游异常、恢复） |
+| GET | `/api/v1/changes` | 变更事件流水（含注销、上游异常、恢复），支持 `kind` 筛选与 `offset` 翻页 |
 | GET | `/api/v1/changes.rss` | 变更事件 RSS |
 | GET/POST | `/api/v1/admin/backup` | 在线生成一致性快照 |
 | GET | `/badge/icp.svg` | SVG 徽章，可直接放进 README |
@@ -314,7 +314,12 @@ trust_proxy: true
 客户端自己填的，末段才是最近一跳代理亲手写的。只取首段等于把「自称的 IP」当身份。
 
 `X-Real-IP` 在 `trust_proxy` 打开时会被采信（nginx 的 `proxy_set_header X-Real-IP
-$remote_addr` 是覆盖写，不是追加，所以它本来就只有一个值）。`CF-Connecting-IP` 不再单独认——
+$remote_addr` 是覆盖写，不是追加，所以它本来就只有一个值）。
+
+采信之前会先校验它**是不是一个 IP**。这一点看着多余，但少了它前面那些都白做：
+末段虽然取对了，内容仍然是客户端写的字符串，每个请求换一个乱码就是一桶新令牌，
+而限流器按 key 建表的 map 会跟着无界增长。反代写进来的 `$remote_addr` 永远是 IP，
+所以「不是 IP 就不认」不会误伤任何正常部署。`CF-Connecting-IP` 不再单独认——
 除非你的 origin 只接受 Cloudflare 的 IP，那时该在 nginx 里 `set_real_ip_from` +
 `real_ip_header CF-Connecting-IP`，让 `$remote_addr` 变成真实客户端。
 

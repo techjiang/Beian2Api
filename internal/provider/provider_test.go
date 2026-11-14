@@ -2,7 +2,11 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,5 +190,81 @@ func TestHedgeDelay(t *testing.T) {
 	}
 	if got := hedgeDelay(100, 0); got != 0 {
 		t.Fatalf("没有权重信息时不该延后，实际 %v", got)
+	}
+}
+
+// 无备案结论必须立刻收工，不能等慢源。
+//
+// 三个源里最快的那个 10ms 就答了「查不到」，最慢的两个要 3s / 4s。
+// 循环条件是「收满 len(tasks) 个回复」，而「无备案」这一支没有 cancel()，
+// 于是 800ms 的宽限实际变成了最长那个源的超时时间——配置里单源超时 8 秒，
+// 一次「查不到」的查询就要 8 秒。查一个没备案的域名正是最需要快的时候。
+func TestRaceNotFoundStopsWaitingForSlowSources(t *testing.T) {
+	start := time.Now()
+	out := Race(context.Background(), "x.com", []Task{
+		{Provider: delayProvider{name: "fast", d: 10 * time.Millisecond, err: ErrNotFound}, Weight: 100, Timeout: 8 * time.Second},
+		{Provider: delayProvider{name: "slow1", d: 3 * time.Second, err: ErrUpstream}, Weight: 40, Timeout: 8 * time.Second},
+		{Provider: delayProvider{name: "slow2", d: 4 * time.Second, err: ErrUpstream}, Weight: 20, Timeout: 8 * time.Second},
+	})
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("无备案结论被慢源拖到 %v（应只等 grace 的 800ms 左右）", el)
+	}
+	if out.Source != "fast" || out.AllFailed {
+		t.Fatalf("结论不对: %+v", out)
+	}
+}
+
+type delayProvider struct {
+	name string
+	d    time.Duration
+	recs []model.Record
+	err  error
+}
+
+func (p delayProvider) Name() string { return p.name }
+func (p delayProvider) Lookup(ctx context.Context, domain string) ([]model.Record, error) {
+	select {
+	case <-time.After(p.d):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return p.recs, p.err
+}
+
+// www. 前缀不能导致「已备案的域名被判成未备案」。
+func TestMIITAcceptsWWWPrefixedDomain(t *testing.T) {
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/auth") {
+			_, _ = w.Write([]byte(`{"success":true,"params":{"bussiness":"tok"}}`))
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotPayload)
+		// 官方接口回显的 domain 不带 www.
+		_, _ = w.Write([]byte(`{"success":true,"params":{"list":[{"domain":"example.com",
+			"unitName":"示例公司","unitType":"企业","serviceName":"示例站点",
+			"serviceLicence":"京ICP备12345678号-1","natureName":"企业",
+			"updateRecordTime":"2024-01-01"}]}}`))
+	}))
+	defer srv.Close()
+
+	m := NewMIIT(Options{HTTP: srv.Client(), Timeout: time.Second})
+	m.authURL = srv.URL + "/auth"
+	m.queryURL = srv.URL + "/query"
+
+	recs, err := m.Lookup(context.Background(), "www.example.com")
+	if err != nil {
+		t.Fatalf("www.example.com 应命中 example.com 的备案，实际报错: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ICPCode != "京ICP备12345678号-1" {
+		t.Fatalf("记录不对: %+v", recs)
+	}
+	// 记录里的 Domain 必须是「查询用的那个」，否则历史快照会写到另一个 key 下，
+	// 巡检和「查看历史」永远读不到。
+	if recs[0].Domain != "www.example.com" {
+		t.Fatalf("Domain 应保持为查询域名，实际 %q", recs[0].Domain)
+	}
+	if gotPayload["unitName"] != "www.example.com" {
+		t.Logf("请求载荷: %v", gotPayload)
 	}
 }

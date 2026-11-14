@@ -643,3 +643,28 @@ func TestUpsertWatchStillCreates(t *testing.T) {
 		t.Fatalf("巡检应把基线写进已有条目: %+v err=%v", it, err)
 	}
 }
+
+// 域名在「上游已经挂着」的时候加入监控：连续失败告警发出去之后，
+// 上游恢复必须也报一条——否则群里最后一条消息永远停在「挂了」。
+func TestRecoveredWhenBaselineBuiltAfterAlert(t *testing.T) {
+	w, st, sb := setup(t)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	sb.err = errors.New("boom")
+	var kinds []string
+	for i := 0; i < 5; i++ {
+		for _, c := range w.RunOnce(context.Background()) {
+			kinds = append(kinds, c.Kind)
+		}
+	}
+	if len(kinds) != 1 || kinds[0] != EventUpstreamError {
+		t.Fatalf("应只报一条上游异常，实际 %v", kinds)
+	}
+	sb.err = nil
+	ch := w.RunOnce(context.Background())
+	if len(ch) != 1 || ch[0].Kind != EventRecovered {
+		t.Fatalf("首次拿到数据的这一轮必须报「已恢复」，实际 %+v", ch)
+	}
+	if ch[0].ICPCode == "" {
+		t.Fatal("恢复事件应带上恢复后的备案号")
+	}
+}

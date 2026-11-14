@@ -48,6 +48,17 @@ func (s *Server) mountStatic(mux *http.ServeMux) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
+			// /api 下的未知路径必须回统一外壳。
+			//
+			// 文档第一句就写着「所有响应统一为 {ok,data} / {ok,error}」，
+			// 而 /api/v1/nope 落到这里只会拿到一行纯文本 `404 page not found`。
+			// 调用方按 ok==false 判错，收到的却是解析不了的 HTML 文本，
+			// 报错信息变成"Unexpected token <"。接口的路径写错是最常见的一类
+			// 调试事故，它该得到一句能看懂的话。
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				writeErr(w, http.StatusNotFound, "not_found", "接口不存在，请查看 /api/v1/openapi.json 或 /docs")
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}

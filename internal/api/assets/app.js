@@ -495,6 +495,27 @@ function withKey(path) {
     fetchWatch(wShowAll ? 0 : wWant, function (items, d) {
       lastStatus = d;
       $('#w-total').textContent = num(d.total) + ' 个';
+      // 「有几个正在报错」是巡检面板最该一眼看到的东西，之前只能逐行去数。
+      // 上百个域名时，一条红标藏在列表第 40 行，等于没有。
+      //
+      // 但这个数字只覆盖**已加载的那部分**：接口分页返回（默认 20 条），
+      // 一个域名排在第 25 位报错时，pill 上写「0 个异常」——比不显示更糟，
+      // 它是句假话。所以分两种情况：
+      //   - 还有没加载的：数字后面加「+」，并用虚线边提示可点，点一下加载全部；
+      //   - 全都在手上：给准确的数字。
+      var bad = items.filter(function (x) { return x.last_error; }).length;
+      var wb = $('#w-bad');
+      if (wb) {
+        var more = d.has_more || items.length < d.total;
+        wb.hidden = bad === 0 && !more;
+        wb.className = 'pill err-pill' + (more ? ' partial' : '');
+        wb.textContent = bad + (more ? '+' : '') + ' 个异常';
+        wb.title = more
+          ? '已加载的 ' + items.length + ' / ' + num(d.total) + ' 个域名里有 ' + bad
+            + ' 个回源失败。点击加载全部再统计'
+          : d.total + ' 个域名里有 ' + bad + ' 个最近一次回源失败，点行内红标看原因';
+        wb.disabled = false;
+      }
       rhythm(d);
       syncRunButton(d);
       wList.innerHTML = '';
@@ -525,13 +546,31 @@ function withKey(path) {
     });
   }
 
+  /* 变更流水的翻页与筛选状态。
+     cWant 是当前要拉多少条（点「加载更多」就加一页），cKind 是类型筛选。
+     轮询刷新时按同样的参数重拉，否则一次 60 秒的自动刷新就把用户
+     刚展开的内容和刚选的筛选一起收回去。 */
+  var cWant = 10, cKind = '';
+
+  var chgWord = {
+    changed: '变更', revoked: '注销', registered: '新增',
+    upstream_error: '上游异常', recovered: '已恢复'
+  };
+
   function loadChanges() {
     if (!cList) return;
-    api('/api/v1/changes?limit=10').then(function (d) {
-      $('#c-total').textContent = d.total >= 10 ? '最近 10 条' : d.total + ' 条';
+    var q = '/api/v1/changes?limit=' + cWant;
+    if (cKind) q += '&kind=' + encodeURIComponent(cKind);
+    api(q).then(function (d) {
+      // 标题要如实反映「看到的是哪一段」：筛了类型还说「最近 10 条」，
+      // 用户会以为这类事件一共就这么多。
+      var seg = cKind ? (chgWord[cKind] || cKind) + ' · ' : '';
+      $('#c-total').textContent = seg + (d.total ? d.total + ' 条' : '0 条');
       cList.innerHTML = '';
       if (!d.items || !d.items.length) {
-        cList.appendChild(el('div', 'hint small-hint', '暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。'));
+        cList.appendChild(el('div', 'hint small-hint', cKind
+          ? '这段时间里没有「' + (chgWord[cKind] || cKind) + '」类事件。换个类型看看，或者等下一次巡检。'
+          : '暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。'));
         return;
       }
       d.items.forEach(function (c) {
@@ -561,10 +600,46 @@ function withKey(path) {
         box.appendChild(diff);
         cList.appendChild(box);
       });
+      if (d.has_more) {
+        // 「还有更多」必须写出来：只说「加载更多」，用户不知道点下去还有几次；
+        // 而流水本身有保留上限（默认 2000 条），翻到那儿就真的没有了。
+        var more = el('button', 'ghost small more', '加载更早的（每次 ' + (cWant < 10 ? 10 : 50) + ' 条）');
+        more.type = 'button';
+        more.onclick = function () {
+          more.disabled = true;
+          more.textContent = '加载中…';
+          cWant += 50;
+          loadChanges();
+        };
+        cList.appendChild(more);
+      }
     }).catch(function (e) {
       cList.innerHTML = '';
       cList.appendChild(el('div', 'err-box', '变更记录读取失败：' + e.message));
     });
+  }
+
+  /* 「N+ 个异常」是可点的：点一下把全部监控项拉下来，数字才是真的。
+     不默认全量拉，是因为这个面板每 60 秒轮询一次，域名上千时全量
+     反序列化只为显示一个数字不值当；但用户想知道准数时必须有路可走。 */
+  var wBad = $('#w-bad');
+  if (wBad) {
+    wBad.onclick = function () {
+      if (!wShowAll) {
+        wShowAll = true;
+        wWant = 0;
+        loadWatch();
+      }
+    };
+  }
+
+  var cKindSel = $('#c-kind');
+  if (cKindSel) {
+    cKindSel.onchange = function () {
+      cKind = cKindSel.value;
+      cWant = 10;
+      loadChanges();
+    };
   }
 
   var runBtn = $('#w-run');

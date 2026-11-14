@@ -110,7 +110,10 @@ func (a *APIHZ) Lookup(ctx context.Context, domain string) ([]model.Record, erro
 	}
 
 	rec := model.Record{
-		Domain:    firstNonEmpty(r.Domain, domain),
+		// 同 miit：统一落成「查询用的域名」，别信上游回显。
+		// 历史快照按 Record.Domain 做 key，和缓存/监控的 key 必须是同一个，
+		// 否则「查看历史」永远是空的。
+		Domain:    domain,
 		UnitName:  cleaner(r.Unit),
 		UnitType:  cleaner(r.Type),
 		SiteName:  "",
@@ -121,9 +124,6 @@ func (a *APIHZ) Lookup(ctx context.Context, domain string) ([]model.Record, erro
 		FetchedAt: model.Now(),
 	}
 	rec.Normalize()
-	if rec.Domain != domain {
-		rec.Domain = domain
-	}
 	return []model.Record{rec}, nil
 }
 
