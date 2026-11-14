@@ -78,6 +78,36 @@
   </section>
 
   <section class="block">
+    <h3>备案巡检</h3>
+    <div class="card panel">
+      <div class="panel-head">
+        <div class="panel-title">
+          <span>监控域名</span>
+          <span class="pill" id="w-total">–</span>
+        </div>
+        <div class="panel-acts">
+          <button class="ghost small" id="w-run" type="button">立即巡检</button>
+          <a class="ghost small link" href="/api/v1/changes.rss" target="_blank" rel="noopener">RSS 订阅</a>
+        </div>
+      </div>
+      <div id="w-list"><div class="hint small-hint">还没有监控域名。查询到结果后点「加入监控」，备案变更会推送给你。</div></div>
+    </div>
+
+    <div class="card panel" style="margin-top:12px">
+      <div class="panel-head">
+        <div class="panel-title">
+          <span>最近变更</span>
+          <span class="pill" id="c-total">–</span>
+        </div>
+        <div class="panel-acts">
+          <button class="ghost small" id="c-refresh" type="button">刷新</button>
+        </div>
+      </div>
+      <div id="c-list"><div class="hint small-hint">暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。</div></div>
+    </div>
+  </section>
+
+  <section class="block">
     <h3>接口调用</h3>
     <div class="tabs" id="tabs">
       <button class="on" data-t="curl">curl</button>

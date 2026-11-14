@@ -111,6 +111,8 @@
           body: JSON.stringify({ domain: d.domain })
         }).then(function () {
           watchBtn.textContent = '监控中 ✓';
+          watchBtn.disabled = true;
+          loadWatch();
         }).catch(function (e) { watchBtn.textContent = '失败：' + e.message; });
       };
       acts.appendChild(watchBtn);
@@ -192,6 +194,127 @@
     if (s < 86400) return Math.floor(s / 3600) + ' 时 ' + Math.floor(s % 3600 / 60) + ' 分';
     return Math.floor(s / 86400) + ' 天';
   }
+
+  /* ---- 巡检面板：监控列表 + 最近变更 ---- */
+  var wList = $('#w-list'), cList = $('#c-list');
+
+  function when(ts) {
+    if (!ts) return '—';
+    var diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+    if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
+    return new Date(ts * 1000).toLocaleDateString('zh-CN');
+  }
+
+  function loadWatch() {
+    if (!wList) return;
+    api('/api/v1/watch/list').then(function (d) {
+      $('#w-total').textContent = d.total + ' 个';
+      wList.innerHTML = '';
+      if (!d.items || !d.items.length) {
+        wList.appendChild(el('div', 'hint small-hint', '还没有监控域名。查询到结果后点「加入监控」，备案变更会推送给你。'));
+        return;
+      }
+      var box = el('div', 'row-list');
+      d.items.forEach(function (it) {
+        var row = el('div', 'row');
+        var dom = el('div', 'dom');
+        var btn = el('button', null, it.domain);
+        btn.type = 'button';
+        btn.onclick = function () { input.value = it.domain; submit(); };
+        dom.appendChild(btn);
+        row.appendChild(dom);
+
+        var sub = el('div', 'sub', (it.changes ? it.changes + ' 次变更' : '暂无变更') + ' · 检查于 ' + when(it.checked_at));
+        row.appendChild(sub);
+        if (it.last_error) {
+          var b = el('span', 'badge err', '上游异常');
+          b.title = it.last_error;
+          row.appendChild(b);
+        } else if (it.last_icp) {
+          row.appendChild(el('span', 'badge', it.last_icp));
+        }
+
+        var grow = el('div', 'grow');
+        var del = el('button', 'drop', '移出');
+        del.type = 'button';
+        del.onclick = function () {
+          api('/api/v1/watch?domain=' + encodeURIComponent(it.domain), { method: 'DELETE' })
+            .then(loadWatch)
+            .catch(function (e) { del.textContent = '失败'; del.title = e.message; });
+        };
+        grow.appendChild(del);
+        row.appendChild(grow);
+        box.appendChild(row);
+      });
+      wList.appendChild(box);
+    }).catch(function (e) {
+      wList.innerHTML = '';
+      wList.appendChild(el('div', 'err-box', '监控列表读取失败：' + e.message));
+    });
+  }
+
+  function loadChanges() {
+    if (!cList) return;
+    api('/api/v1/changes?limit=10').then(function (d) {
+      $('#c-total').textContent = d.total + ' 条';
+      cList.innerHTML = '';
+      if (!d.items || !d.items.length) {
+        cList.appendChild(el('div', 'hint small-hint', '暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。'));
+        return;
+      }
+      d.items.forEach(function (c) {
+        var box = el('div', 'chg');
+        var head = el('div', 'chg-head');
+        var domBtn = el('button', null, c.domain);
+        domBtn.type = 'button';
+        domBtn.style.cssText = 'padding:0;font-size:14px;font-weight:600;color:var(--fg);background:none;border:0;cursor:pointer;font-family:inherit';
+        domBtn.onclick = function () { input.value = c.domain; submit(); };
+        head.appendChild(domBtn);
+        if (c.icp_code) head.appendChild(el('span', 'badge', c.icp_code));
+        head.appendChild(el('span', 'when', when(c.at)));
+        box.appendChild(head);
+
+        var diff = el('div', 'chg-diff');
+        if (c.diff && c.diff.length) {
+          diff.appendChild(document.createTextNode(c.diff.map(function (x) {
+            return x.field + '：' + (x.from || '无') + ' → ' + (x.to || '无');
+          }).join('；')));
+        } else {
+          diff.appendChild(document.createTextNode('备案信息发生变化'));
+        }
+        box.appendChild(diff);
+        cList.appendChild(box);
+      });
+    }).catch(function (e) {
+      cList.innerHTML = '';
+      cList.appendChild(el('div', 'err-box', '变更记录读取失败：' + e.message));
+    });
+  }
+
+  var runBtn = $('#w-run');
+  if (runBtn) {
+    runBtn.onclick = function () {
+      runBtn.disabled = true;
+      runBtn.textContent = '巡检中…';
+      api('/api/v1/watch/run', { method: 'POST' })
+        .then(function (d) {
+          runBtn.textContent = d.count ? '发现 ' + d.count + ' 处变更' : '无变更';
+          loadWatch(); loadChanges();
+        })
+        .catch(function (e) { runBtn.textContent = '失败：' + e.message; })
+        .finally(function () {
+          setTimeout(function () { runBtn.disabled = false; runBtn.textContent = '立即巡检'; }, 2200);
+        });
+    };
+  }
+  var cRefresh = $('#c-refresh');
+  if (cRefresh) cRefresh.onclick = loadChanges;
+
+  loadWatch();
+  loadChanges();
 
   var snippets = {
     curl: 'curl "' + location.origin + '/api/v1/query?domain=example.com"\n\n# 强制回源\ncurl "' + location.origin + '/api/v1/query?domain=example.com&refresh=1"\n\n# 批量\ncurl -X POST "' + location.origin + '/api/v1/batch" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"domains":["qq.com","baidu.com"]}\'',

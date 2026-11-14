@@ -189,8 +189,57 @@ footer.foot { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--l
 footer.foot .sp { margin-left: auto; }
 .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.45); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.fade { animation: fade .35s ease both; }
-@keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* 只位移不淡入：淡入需要从 opacity:0 起步，一旦动画没跑完（后台标签页、
+   截图、渲染被打断）内容就是隐形的，查询结果不该有这种风险。 */
+.fade { animation: fade .3s ease both; }
+@media (prefers-reduced-motion: reduce) {
+  .fade { animation: none; }
+}
+@keyframes fade { from { transform: translateY(6px); } to { transform: none; } }
+
+/* 巡检面板 */
+.panel { padding: 14px 16px; }
+.panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+.panel-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.panel-acts { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.panel-acts .link {
+  display: inline-flex; align-items: center; padding: 8px 12px; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 10px; color: var(--fg-soft);
+}
+.panel-acts .link:hover { text-decoration: none; background: var(--bg); color: var(--fg); }
+.pill {
+  padding: 1px 8px; font-size: 12px; font-weight: 600; border-radius: 999px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+.small-hint { padding: 14px 4px; font-size: 13px; text-align: left; }
+.row-list { display: flex; flex-direction: column; }
+.row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 2px;
+  border-top: 1px solid var(--line); font-size: 14px;
+}
+.row:first-child { border-top: 0; }
+.row .dom { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .dom button {
+  padding: 0; font-size: 14px; font-weight: 600; color: var(--fg);
+  background: none; border: 0; cursor: pointer; font-family: inherit;
+}
+.row .dom button:hover { color: var(--brand); }
+.row .sub { font-size: 12px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+.row .badge { white-space: nowrap; }
+.row .grow { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.row .drop {
+  padding: 5px 10px; font-size: 12px; font-weight: 500; color: var(--fg-mute);
+  background: transparent; border: 1px solid var(--line); border-radius: 8px;
+}
+.row .drop:hover { color: var(--err); border-color: var(--err); filter: none; }
+.chg { padding: 10px 2px; border-top: 1px solid var(--line); font-size: 14px; }
+.chg:first-child { border-top: 0; }
+.chg-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.chg-head .when { margin-left: auto; font-size: 12px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+.chg-diff { margin-top: 4px; font-size: 13px; color: var(--fg-soft); }
+.chg-diff .k { color: var(--fg-mute); }
+
 @media (max-width: 640px) {
   .wrap { padding: 14px 14px 48px; }
   header.top { gap: 8px; padding-bottom: 20px; flex-wrap: nowrap; }
@@ -207,6 +256,14 @@ footer.foot .sp { margin-left: auto; }
   dl.kv dd { font-size: 14px; }
   .search form button { flex: 1 1 100%; }
   .res-card { padding: 14px; }
+  .panel { padding: 12px; }
+  .row { font-size: 13px; flex-wrap: wrap; row-gap: 3px; }
+  .row .dom { flex: 1 1 auto; }
+  .row .dom button { font-size: 13px; }
+  /* 小屏一行放不下四段信息：域名 + 备案号 + 操作在上，时间另起一行，避免域名被截断。 */
+  .row .badge { order: 2; white-space: nowrap; }
+  .row .grow { order: 2; }
+  .row .sub { order: 3; flex: 1 1 100%; }
   pre { font-size: 12px; }
 }
 @media (max-width: 400px) {

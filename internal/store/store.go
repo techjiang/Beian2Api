@@ -347,8 +347,11 @@ func (s *Store) AppendChange(id string, v any) error {
 	})
 }
 
-// ListChanges 返回最近的变更事件（新的在前），fn 负责反序列化。
-func (s *Store) ListChanges(limit int, fn func([]byte) error) error {
+// ListChanges 按时间倒序（新的在前）遍历变更事件，最多保留 limit 条。
+//
+// fn 返回 keep=false 时该条被丢弃，且不占用 limit 名额。过滤必须发生在
+// 截断之前，否则「since 增量拉取」会先被 limit 截断，中间的事件就漏了。
+func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error)) error {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -356,8 +359,12 @@ func (s *Store) ListChanges(limit int, fn func([]byte) error) error {
 		c := tx.Bucket(bucketChanges).Cursor()
 		n := 0
 		for k, v := c.Last(); k != nil; k, v = c.Prev() {
-			if err := fn(v); err != nil {
+			keep, err := fn(v)
+			if err != nil {
 				return err
+			}
+			if !keep {
+				continue
 			}
 			n++
 			if n >= limit {

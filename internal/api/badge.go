@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/asoe/beian2api/internal/service"
@@ -158,5 +157,3 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, doc)
 }
-
-var _ = strconv.Itoa

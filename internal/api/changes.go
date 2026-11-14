@@ -20,16 +20,16 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 
 	var out []watch.Change
-	err := s.svc.Store().ListChanges(limit, func(raw []byte) error {
+	err := s.svc.Store().ListChanges(limit, func(raw []byte) (bool, error) {
 		var c watch.Change
 		if json.Unmarshal(raw, &c) != nil {
-			return nil
+			return false, nil
 		}
 		if since > 0 && c.At < since {
-			return nil
+			return false, nil
 		}
 		out = append(out, c)
-		return nil
+		return true, nil
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
@@ -53,12 +53,13 @@ func (s *Server) handleRSS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var items []watch.Change
-	_ = s.svc.Store().ListChanges(100, func(raw []byte) error {
+	_ = s.svc.Store().ListChanges(100, func(raw []byte) (bool, error) {
 		var c watch.Change
-		if json.Unmarshal(raw, &c) == nil {
-			items = append(items, c)
+		if json.Unmarshal(raw, &c) != nil {
+			return false, nil
 		}
-		return nil
+		items = append(items, c)
+		return true, nil
 	})
 
 	var b strings.Builder

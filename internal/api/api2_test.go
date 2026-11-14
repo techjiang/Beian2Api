@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -239,5 +240,24 @@ func TestWatchReAddKeepsProgress(t *testing.T) {
 	}
 	if again.LastFP == "" {
 		t.Fatal("基线指纹应被保留")
+	}
+}
+
+// since 增量拉取不能被 limit 截断：中间早于 limit 窗口的事件也必须能取到。
+func TestChangesSinceNotTruncatedByLimit(t *testing.T) {
+	s, h := mkServer(t, nil)
+	for i, d := range []string{"a.com", "b.com", "c.com", "d.com"} {
+		_ = s.svc.Store().AppendChange(fmt.Sprintf("%020d-%s", 100+i, d), map[string]any{
+			"domain": d, "at": 100 + i,
+		})
+	}
+	// limit 只数「符合 since」的那些，最旧的 a.com（at=100）必须被过滤掉。
+	_, body := get(t, h, "/api/v1/changes?since=101&limit=1", nil)
+	if !strings.Contains(body, "d.com") || strings.Contains(body, "a.com") {
+		t.Fatalf("since 与 limit 应各自生效: %s", body)
+	}
+	_, body = get(t, h, "/api/v1/changes?since=101&limit=10", nil)
+	if strings.Contains(body, "a.com") {
+		t.Fatalf("早于 since 的事件必须过滤: %s", body)
 	}
 }

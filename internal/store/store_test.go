@@ -1,7 +1,9 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -125,5 +127,35 @@ func TestBulkAndAllCache(t *testing.T) {
 	c, err := s.Count()
 	if err != nil || c.Cache != 3 {
 		t.Fatalf("计数不对: %+v %v", c, err)
+	}
+}
+
+func TestListChangesFilterBeforeLimit(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 5; i++ {
+		if err := s.AppendChange(fmt.Sprintf("%020d-d%d.com", 1000+i, i), map[string]any{"at": 1000 + i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 4 条都不符合条件，limit=2 也仍然要拿到最后那条符合的。
+	var kept []string
+	err := s.ListChanges(2, func(raw []byte) (bool, error) {
+		var v struct {
+			At int64 `json:"at"`
+		}
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return false, err
+		}
+		if v.At < 1004 {
+			return false, nil
+		}
+		kept = append(kept, fmt.Sprint(v.At))
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 || kept[0] != "1004" {
+		t.Fatalf("过滤应先于截断，实际 %v", kept)
 	}
 }

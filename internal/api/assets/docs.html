@@ -132,7 +132,8 @@
 
   <hr>
   <div class="ep"><span class="method get">GET</span>/api/v1/changes</div>
-  <p>最近记录的备案变更事件，支持 <code>since</code>（Unix 秒）增量拉取。</p>
+  <p>最近记录的备案变更事件，支持 <code>since</code>（Unix 秒）增量拉取。
+  过滤发生在 <code>limit</code> 截断之前，所以 <code>since</code> 不会因为条数上限而漏事件。</p>
   <div class="ep"><span class="method get">GET</span>/api/v1/changes.rss</div>
   <p>同样的变更事件，输出为 RSS 2.0，可直接喂给 RSS 阅读器或 IM 机器人。</p>
 
