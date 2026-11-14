@@ -38,7 +38,15 @@ auth:
   # 网页端在 401 时会自动露出输入框，填一次存在浏览器里。
 
 cors:
-  - "*"                # 生产环境建议改成你的前端域名
+  # "*" 只覆盖「公开查询」类接口（query / batch / history / verify / 徽章）——
+  # 查一个域名的备案号本来就是公开信息，别人家的前端来调是设计目标。
+  #
+  # 但下面这些回答的是「这台机器自己的状态」，通配符对它们不生效：
+  #   /api/v1/stats、/api/v1/providers、/api/v1/watch/*、/api/v1/changes(.rss)、
+  #   /api/v1/notify/status、/api/v1/admin/*
+  # 监控清单是一份情报，不该是默认值的副作用。要跨域读这些，把域名写清楚：
+  #   - "https://ops.example.com"
+  - "*"
 
 storage:
   # 只增数据（变更流水、历史快照）的滚动保留上限，0 表示不裁剪。

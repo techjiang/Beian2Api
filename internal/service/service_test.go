@@ -104,7 +104,7 @@ func TestQueryStaleFallback(t *testing.T) {
 	s.err = errors.New("boom")
 	s.recs = nil
 	svc.tasks[0].Provider = s
-	svc.st.DeleteCache("example.com")
+	_, _ = svc.st.DeleteCache("example.com")
 
 	// 先手工塞一条过期快照，验证回退路径。
 	_ = svc.st.PutCache(&store.Entry{

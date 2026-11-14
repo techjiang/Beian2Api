@@ -56,6 +56,25 @@
             <button class="ghost small" id="ov-refresh" type="button">刷新</button>
           </div>
         </div>
+        <!-- 趋势：最近 24 小时。
+             放在最上面是因为它是这一页唯一回答「在变好还是变坏」的东西，
+             下面所有面板都只描述「此刻」。 -->
+        <div class="card panel chart-panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <span>最近 24 小时</span>
+              <span class="pill" id="ov-chart-total">–</span>
+            </div>
+            <div class="chart-legend">
+              <span class="lg hits"><i></i>命中</span>
+              <span class="lg miss"><i></i>回源</span>
+              <span class="lg chg"><i></i>变更（底部柱条）</span>
+            </div>
+          </div>
+          <div id="ov-chart"><div class="hint small-hint">读取中…</div></div>
+          <div class="chart-foot small-hint" id="ov-chart-foot"></div>
+        </div>
+
         <div class="grid tiles" id="ov-tiles">
           <div class="card tile"><div class="k">已缓存域名</div><div class="v" id="ov-cache">–</div><div class="s">重复查询毫秒级</div></div>
           <div class="card tile"><div class="k">历史快照</div><div class="v" id="ov-history">–</div><div class="s" id="ov-hitrate">命中率 –</div></div>

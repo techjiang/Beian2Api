@@ -154,12 +154,24 @@ func TestAdminRejectsDNSRebinding(t *testing.T) {
 	}
 }
 
-// `cors: ["*"]` 只该放行只读接口，绝不能顺带把后台也开放出去。
+// `cors: ["*"]` 只该放行「公开查询」类接口，绝不能顺带把实例状态也开放出去。
+//
+// 这条用例原来断言 /api/v1/stats 返回 ACAO:*——那正是后来的漏洞：
+// 同一份通配配置顺带把监控域名清单、变更流水、运行统计交给了任意站点。
+// 备案查询是公开信息，而「这台机器在盯哪些域名」是情报，两者不该共用一个开关。
 func TestAdminCORSWildcardDoesNotExposeAdmin(t *testing.T) {
 	_, h := mkServer(t, func(c *config.Config) { c.CORS = []string{"*"} })
-	resp, body := get(t, h, "/api/v1/stats", map[string]string{"Origin": "https://evil.example"})
+	// 公开查询类保持通配。
+	resp, body := get(t, h, "/api/v1/query?domain=example.com", map[string]string{"Origin": "https://evil.example"})
 	if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
-		t.Fatalf("只读接口仍应允许通配跨域")
+		t.Fatalf("公开查询接口仍应允许通配跨域")
+	}
+	// 实例状态类不行。
+	for _, p := range []string{"/api/v1/stats", "/api/v1/watch/list", "/api/v1/changes"} {
+		r2, _ := get(t, h, p, map[string]string{"Origin": "https://evil.example"})
+		if got := r2.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s 不该被通配 CORS 公开，实际 ACAO=%q", p, got)
+		}
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/overview", nil)

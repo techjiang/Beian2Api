@@ -36,7 +36,7 @@ func TestCacheRoundTrip(t *testing.T) {
 	if err != nil || !got.Found || len(got.Records) != 1 || got.Records[0].ICPCode != "京ICP备1号" {
 		t.Fatalf("读回数据不对: %+v %v", got, err)
 	}
-	if err := s.DeleteCache("example.com"); err != nil {
+	if _, err := s.DeleteCache("example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetCache("example.com"); !errors.Is(err, ErrNotFound) {

@@ -525,16 +525,40 @@ curl / 脚本调用。**它们都能改数据**，所以访问控制与只读接
 JSON 解析不看 `Content-Type`——清空缓存、清空监控都不需要攻击者拿到 Key。
 `curl` 和脚本不带这些头，因此不受影响。
 
-另外 `cors: ["*"]` **不会**让后台跨域开放。通配符是给只读查询台的
-（别人家的前端、README 徽章），后台要跨域请在 `cors` 里写明确域名——
-它返回的是监控域名清单、缓存内容和数据文件路径。
+**这层防护覆盖的不只是 `/api/v1/admin/*`。** 判据是「会不会改变实例状态」，
+所以下面这几个公开接口同样受保护：
+
+| 接口 | 为什么算状态变更 |
+| --- | --- |
+| `POST /api/v1/watch` | 把任意域名塞进监控清单，等于往「这台机器在盯什么」里写入 |
+| `DELETE /api/v1/watch` | 把别人的监控悄悄移出，巡检就此停掉——**没有任何人会收到通知** |
+| `POST /api/v1/watch/run` | 每调一次就是一次全量回源，等于拿别人的机器打上游 |
+| `POST /api/v1/notify/test` | 往所有推送通道发消息，等于替你往群里发言 |
+
+只读的备案查询（`query` / `batch` / `history` / `verify` / 徽章）不受这层
+限制——它们本来就是公开信息，跨站调用是设计目标。
+
+### 通配 CORS 只覆盖公开查询
+
+`cors: ["*"]`（默认值）**只**让公开查询类接口可被任意站点读取。
+下面这些回答的是「这台机器自己的状态」，通配符一律不生效，要跨域就必须在
+`cors` 里把域名写清楚：
+
+`/api/v1/stats`、`/api/v1/providers`、`/api/v1/watch/list`、
+`/api/v1/watch/status`、`/api/v1/changes`、`/api/v1/changes.rss`、
+`/api/v1/notify/status`、`/api/v1/admin/*`
+
+理由很直接：查一个域名的备案号是公开信息，而「你在监控哪些域名、什么变了、
+数据文件在哪」是一份情报。默认配置下攻击者只要让受害者打开一个页面，
+就能把整份监控清单读走——这不该是 `cors` 默认值的副作用。
 
 `/admin` 页面本身是公开的静态页面（里面没有任何数据），方便打开后看到
 「需要 API Key」的提示；被守住的是下面每一个接口。
 
 ### GET /api/v1/admin/overview
 
-概览页一次取全：数据量、命中率、存储策略、上游、巡检节奏、推送状态、备份列表。
+概览页一次取全：数据量、命中率、**最近 24 小时趋势**、存储策略、上游、巡检节奏、
+推送状态、备份列表。
 
 ```bash
 curl "http://127.0.0.1:8080/api/v1/admin/overview"
@@ -558,10 +582,32 @@ curl "http://127.0.0.1:8080/api/v1/admin/overview"
                "last_run_at": 1735689600, "last_count": 1, "next_run_at": 1735776000 },
     "notify": [{ "name": "ops", "kind": "dingtalk", "last_at": 1735689500, "last_ok": true }],
     "backups": [{ "name": "beian2api-20241114-120000.db", "size": 4718592, "created_at": 1735689600 }],
-    "auth": { "enabled": false }
+    "auth": { "enabled": false },
+    "series": [
+      { "hour": 1735682400, "hits": 128, "misses": 12, "stale": 0, "changes": 0, "cache": 1240 },
+      { "hour": 1735686000, "hits": 96,  "misses": 9,  "stale": 1, "changes": 2, "cache": 1244 }
+    ]
   }
 }
 ```
+
+**`series` 是按小时聚合的最近 24 小时**，缺失的小时补零（不跳过），所以
+`series` 的长度恒为 24、相邻两点恒差一小时——前端直接按下标铺时间轴，
+不需要自己对时间。字段含义：
+
+| 字段 | 说明 |
+| --- | --- |
+| `hits` / `misses` / `stale` | 这一小时内的累加值 |
+| `changes` | 这一小时内产生的变更事件数 |
+| `cache` | 这一小时的**最后观测值**（缓存条目数），不是累加 |
+
+`hits + misses == 0` 的小时代表「没有请求」，不是「命中率为 0」——画图时
+这两者必须区分开，否则一次停机会被读成命中率归零。前端用
+`hits / (hits + misses)` 自己算，为 0 分母时留空断线。
+
+序列保留 7 天（168 个键，约 20KB），滚动覆盖，不需要配置。它跟计数器
+共用同一次落盘（15 秒一拍），不会额外多一次 fsync——丢 15 秒的曲线数据
+没人看得出来，而每次请求都同步写一遍才是真的伤性能。
 
 ### 缓存
 
@@ -571,6 +617,20 @@ curl "http://127.0.0.1:8080/api/v1/admin/cache?q=example&limit=30&offset=0"
 
 # 删一个域名（会做 canonical 归一化，用 www 版本删也能删到主域名那条）
 curl -X DELETE "http://127.0.0.1:8080/api/v1/admin/cache?domain=example.com"
+```
+
+返回体里的 `deleted` 是**真的删到了没有**，不是「有没有出错」：
+
+```json
+{ "ok": true, "data": { "domain": "example.com", "deleted": true } }
+```
+
+删一个从没缓存过的域名会得到 `"deleted": false`。这一条不能省：
+bbolt 的 Delete 对不存在的 key 返回 nil，照旧回 `true` 的话，后台会弹
+「已删除 nope.com」——而那个域名从来没被缓存过，用户只会以为自己记错了域名，
+或者怀疑删除按钮根本没生效。
+
+```bash
 
 # 清理：only_expired=true 只删「已过期且超出回退窗口」的，false 全清
 curl -X POST "http://127.0.0.1:8080/api/v1/admin/cache/clear" \

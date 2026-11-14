@@ -96,6 +96,12 @@ type Store struct {
 	histCount  int64
 	histSeeded bool
 
+	// seriesPending 是「当前小时」的序列增量，跟计数器一样攒着等 Flush。
+	// 按小时分组而不是只留一行：跨过整点时，前一小时和这一小时的增量都在
+	// 这个 map 里，各自归到自己那行，不会把两小时混成一小时。
+	seriesMu      sync.Mutex
+	seriesPending map[int64]*SeriesPoint
+
 	// lastPurge 是上次清理过期缓存的时间戳（Unix 秒）。
 	// 清理是 O(缓存条目数) 的全表遍历，跟着 15 秒的维护节奏跑，
 	// 十万条缓存就是每 15 秒扫十万条。真正该有的是「定期」而不是「频繁」。
@@ -138,11 +144,12 @@ func OpenFile(path string) (*Store, error) {
 	}
 	s := &Store{
 		db: db, path: path, counters: map[string]int64{}, base: map[string]int64{},
+		seriesPending: map[int64]*SeriesPoint{},
 		retainChanges: DefaultRetainChanges, retainHistory: DefaultRetainHistory,
 		retainHistoryTotal: DefaultRetainHistoryTotal, staleMax: DefaultStaleWindow,
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCache, bucketHistory, bucketWatch, bucketMeta, bucketKeys, bucketChanges, bucketNotify} {
+		for _, b := range [][]byte{bucketCache, bucketHistory, bucketWatch, bucketMeta, bucketKeys, bucketChanges, bucketNotify, bucketSeries} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -218,11 +225,23 @@ func (s *Store) PutCache(e *Entry) error {
 	})
 }
 
-// DeleteCache 删除某域名的缓存。
-func (s *Store) DeleteCache(domain string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketCache).Delete([]byte(domain))
+// DeleteCache 删除某域名的缓存，返回是否真的删掉了一条。
+//
+// 返回值不是「有没有出错」：bbolt 的 Delete 对不存在的 key 返回 nil，
+// 于是删一个从没查过的域名也会「成功」。后台照着这个结果显示
+// 「已删除 nope.com」，而那个域名从来没被缓存过——用户会以为自己的删除
+// 生效了、或者以为缓存里本来有它。
+func (s *Store) DeleteCache(domain string) (bool, error) {
+	existed := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketCache)
+		if b.Get([]byte(domain)) == nil {
+			return nil
+		}
+		existed = true
+		return b.Delete([]byte(domain))
 	})
+	return existed, err
 }
 
 // AppendHistory 追加一条历史快照。
@@ -599,6 +618,9 @@ func (s *Store) Incr(name string, delta int64) (int64, error) {
 	s.dirty = true
 	v := s.base[name] + s.counters[name]
 	s.cmu.Unlock()
+	// 同一个增量也喂给时间序列。放在这里而不是让每个调用点自己记：
+	// 「hits 加了一次」这件事只该有一个入口，两处分别记迟早会漂。
+	s.bumpSeries(name, delta)
 	return v, nil
 }
 
@@ -630,7 +652,9 @@ func (s *Store) Flush() error {
 			}
 			bumped[name] = int64(v)
 		}
-		return nil
+		// 时间序列跟着同一次事务落盘：维护循环本来就每 15 秒开一次写事务，
+		// 顺手把曲线写进去，不额外多一次 fsync。
+		return s.flushSeries(tx)
 	})
 
 	s.cmu.Lock()
@@ -887,6 +911,11 @@ func (s *Store) TrimHistory(keep int) (int, error) {
 // 域名上千之后会跑成秒级。历史改成写入时就地裁（见 AppendHistory）。
 func (s *Store) Maintain() (MaintResult, error) {
 	var r MaintResult
+	// 缓存条目数只需要一个「这一小时的观测值」，所以在维护这一拍取一次。
+	// 放在 Flush 之前：它写进的是同一个 seriesPending，跟着一起落盘。
+	if c, err := s.Count(); err == nil {
+		s.ObserveCacheSize(c.Cache)
+	}
 	if err := s.Flush(); err != nil {
 		return r, err
 	}

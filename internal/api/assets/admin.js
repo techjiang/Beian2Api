@@ -198,6 +198,157 @@ function withKey(path) {
     });
   }
 
+  /* ---- 趋势图 ----
+     原生 SVG，不引图表库。一个概览页的折线图不值得为它背一个 60KB 的依赖，
+     而这个项目从第一天起就是「单二进制、零外部资源」——图也算外部资源。 */
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function svg(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+    return n;
+  }
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function hourLabel(ts) { var d = new Date(ts * 1000); return pad2(d.getHours()) + ':00'; }
+
+  /* 折线路径。values 里小于 0 的项视为「没有数据」，断开而不是画成 0：
+     0 和「没请求」在图上必须长得不一样，否则一次停机会被读成命中率归零。 */
+  function linePath(values, w, h, max) {
+    var n = values.length;
+    var step = n > 1 ? w / (n - 1) : w;
+    var out = '', pen = false;
+    for (var i = 0; i < n; i++) {
+      var v = values[i];
+      if (v < 0) { pen = false; continue; }
+      var x = n > 1 ? i * step : w / 2;
+      var y = h - (max > 0 ? (v / max) * h : 0);
+      out += (pen ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
+      pen = true;
+    }
+    return out.trim();
+  }
+
+  function areaPath(values, w, h, max) {
+    var d = linePath(values, w, h, max);
+    if (!d) return '';
+    var n = values.length;
+    var step = n > 1 ? w / (n - 1) : w;
+    var first = -1, last = -1;
+    for (var i = 0; i < n; i++) {
+      if (values[i] >= 0) { if (first < 0) first = i; last = i; }
+    }
+    var x0 = n > 1 ? first * step : w / 2;
+    var x1 = n > 1 ? last * step : w / 2;
+    return d + ' L' + x1.toFixed(1) + ' ' + h + ' L' + x0.toFixed(1) + ' ' + h + ' Z';
+  }
+
+  function drawChart(points) {
+    var host = $('#ov-chart');
+    host.innerHTML = '';
+    if (!points || !points.length) {
+      host.appendChild(el('div', 'hint small-hint', '还没有数据。这个序列按小时聚合，跑满一小时就会出现第一段。'));
+      return;
+    }
+    var W = 720, H = 132, PAD_T = 8, PAD_B = 4;
+    var inner = H - PAD_T - PAD_B;
+
+    var hits = [], miss = [], chg = [];
+    var totalReq = 0, totalChg = 0;
+    points.forEach(function (p) {
+      hits.push(p.hits || 0);
+      miss.push(p.misses || 0);
+      chg.push(p.changes || 0);
+      totalReq += (p.hits || 0) + (p.misses || 0);
+      totalChg += p.changes || 0;
+    });
+
+    // 请求量用两条独立折线而不是堆叠：命中与回源各自一条，交叉点就是
+    // 命中率跌破一半的位置，堆叠图反而看不出这一点。
+    var reqMax = 1, chgMax = 1;
+    points.forEach(function (p) {
+      reqMax = Math.max(reqMax, (p.hits || 0) + (p.misses || 0), p.hits || 0);
+      chgMax = Math.max(chgMax, p.changes || 0);
+    });
+
+    var root = svg('svg', {
+      viewBox: '0 0 ' + W + ' ' + H,
+      preserveAspectRatio: 'none',
+      class: 'chart',
+      role: 'img',
+      'aria-label': '最近 24 小时的命中、回源与变更趋势'
+    });
+
+    // 网格：三条横线，只在有数据时画，免得空图上挂一堆装饰。
+    for (var g = 0; g <= 2; g++) {
+      var gy = PAD_T + inner * g / 2;
+      root.appendChild(svg('line', {
+        x1: 0, y1: gy.toFixed(1), x2: W, y2: gy.toFixed(1),
+        class: 'grid'
+      }));
+    }
+
+    var hitsPath = linePath(hits, W, inner, reqMax);
+    var missPath = linePath(miss, W, inner, reqMax);
+
+    if (hitsPath) {
+      var grp = svg('g', { transform: 'translate(0,' + PAD_T + ')' });
+      grp.appendChild(svg('path', { d: areaPath(hits, W, inner, reqMax), class: 'area-hits' }));
+      grp.appendChild(svg('path', { d: missPath, class: 'ln miss' }));
+      grp.appendChild(svg('path', { d: hitsPath, class: 'ln hits' }));
+      root.appendChild(grp);
+    }
+
+    // 变更不画折线。
+    //
+    // 第一版把它也画成折线、按自己的比例铺满图高——结果一条「8 次变更」
+    // 的尖峰看着和「270 次查询」一样高，读图的人会以为那小时流量爆了。
+    // 换个 Y 轴能让形状好看，但那是骗人：两条曲线一旦不共享刻度，
+    // 它们之间的任何高低比较都是假的。
+    //
+    // 所以变更改成贴底的小柱条，封顶图高的 22%。它回答的是「什么时候
+    // 有变动」，不是「变了多少」，柱条够用，也不会被误读成流量。
+    var barH = inner * 0.22;
+    var n = points.length;
+    var bw = Math.max(1.5, Math.min(6, (W / Math.max(n, 1)) * 0.5));
+    var bars = svg('g', { transform: 'translate(0,' + (PAD_T + inner - barH) + ')' });
+    points.forEach(function (p, i) {
+      var v = p.changes || 0;
+      if (v <= 0) return;
+      var step = n > 1 ? W / (n - 1) : W;
+      var x = (n > 1 ? i * step : W / 2) - bw / 2;
+      var hh = Math.max(1.5, barH * (v / chgMax));
+      bars.appendChild(svg('rect', {
+        x: x.toFixed(1), y: (barH - hh).toFixed(1),
+        width: bw.toFixed(1), height: hh.toFixed(1),
+        rx: Math.min(1.5, bw / 2), class: 'bar-chg'
+      }));
+    });
+    root.appendChild(bars);
+    host.appendChild(root);
+
+    // 时间轴：只标首、中、尾，24 个标签在 414px 上会糊成一团。
+    var axis = el('div', 'chart-axis');
+    var idx = [0, Math.floor((points.length - 1) / 2), points.length - 1];
+    idx.forEach(function (i, k) {
+      var s = el('span', null, hourLabel(points[i].hour));
+      if (k === 1) s.className = 'mid';
+      axis.appendChild(s);
+    });
+    host.appendChild(axis);
+
+    $('#ov-chart-total').textContent = num(totalReq) + ' 次请求';
+    var peak = 0, peakAt = 0;
+    points.forEach(function (p) {
+      var t = (p.hits || 0) + (p.misses || 0);
+      if (t > peak) { peak = t; peakAt = p.hour; }
+    });
+    $('#ov-chart-foot').textContent = totalReq
+      ? '峰值 ' + num(peak) + ' 次/时（' + hourLabel(peakAt) + '）· 共 ' + num(totalChg) + ' 次变更'
+      : '这 24 小时没有查询请求。';
+  }
+
   /* ---- 概览 ---- */
   function loadOverview() {
     return api('/api/v1/admin/overview').then(function (d) {
@@ -209,6 +360,7 @@ function withKey(path) {
       $('#ov-hitrate').textContent = '命中率 ' + d.requests.hit_rate + '%';
       $('#ov-stale').textContent = '回退 ' + num(d.requests.stale_fallbacks) + ' 次';
       $('#ov-uptime').textContent = '运行 ' + dur(d.uptime_sec);
+      drawChart(d.series);
 
       var rh = $('#ov-rhythm');
       if (!d.watch.enabled) {

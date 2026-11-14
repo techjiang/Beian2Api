@@ -100,7 +100,18 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 
 	backups := s.backupsRows()
 
+	// 趋势：最近 24 小时的小时序列。概览页顶上那张折线图就取这一份。
+	//
+	// 合成在 overview 里而不是单独开接口：首屏本来就要一次请求拿全部，
+	// 再拆一个「图表接口」只会让首屏从「等一次」变成「等最慢的那次」，
+	// 而 24 行的数据在这里几乎不要钱。
+	series, err := s.svc.Store().Series(24)
+	if err != nil {
+		series = nil
+	}
+
 	writeOK(w, map[string]any{
+		"series":     series,
 		"version":    s.version,
 		"uptime_sec": int(time.Since(s.startAt).Seconds()),
 		"now":        time.Now().Unix(),
@@ -196,11 +207,16 @@ func (s *Server) handleAdminCache(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "missing_domain", "缺少 domain 参数")
 			return
 		}
-		if err := s.svc.Store().DeleteCache(d); err != nil {
+		deleted, err := s.svc.Store().DeleteCache(d)
+		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
-		writeOK(w, map[string]any{"domain": d, "deleted": true})
+		// 没删到任何东西时如实说没删到。
+		// bbolt 的 Delete 对不存在的 key 返回 nil，照旧写 deleted:true 的话，
+		// 前端会弹「已删除 nope.com」——而那个域名从来没被缓存过，
+		// 用户只会以为自己记错了域名，或者怀疑删除按钮没生效。
+		writeOK(w, map[string]any{"domain": d, "deleted": deleted})
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 GET / DELETE")
 	}

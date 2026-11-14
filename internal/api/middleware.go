@@ -264,13 +264,18 @@ func isPublicPath(p string) bool {
 func (s *Server) withCommon(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		// 后台接口不走「通配 CORS」。
+		// 「这台机器上有什么」不能靠通配 CORS 公开。
 		//
-		// `cors: ["*"]` 的默认值是给只读查询台用的（别人家的前端、README 徽章）。
-		// 后台返回的是监控域名清单、缓存内容、数据文件路径，而且暴露它等于
-		// 让任意网站能读到「这台机器上有什么」。所以这里只认 cors 里
-		// 明确列出的域名，通配符不算——想跨域调后台，就把域名写清楚。
-		if isAdminPath(r.URL.Path) {
+		// `cors: ["*"]` 的默认值是给只读查询台用的（别人家的前端、README 徽章）：
+		// 查一个域名的备案号本来就是公开信息。但同一份配置顺带把
+		// 监控域名清单、变更流水、运行统计也开放给了任意站点——
+		// 而这些回答的是「这台机器在盯着哪些域名」，那是一份情报，
+		// 不是公开信息。默认配置下攻击者只要让受害者打开一个页面，
+		// 就能把清单整份读走。
+		//
+		// 所以分成两类：公开查询类接口保持通配，实例状态类接口只认
+		// cors 里明确列出的域名（通配符不算）。
+		if s.sensitivePath(r.URL.Path) {
 			if origin := r.Header.Get("Origin"); origin != "" && s.adminOriginAllowed(origin, r.Host) {
 				h.Set("Access-Control-Allow-Origin", origin)
 				h.Set("Vary", "Origin")
@@ -326,7 +331,7 @@ func (s *Server) originAllowed(origin string) bool {
 //     完全放行；而服务端看到的是 RemoteAddr=127.0.0.1，回环判据也放行。
 //     唯一露馅的地方是 Host 头：它写的是 evil.com。
 //
-// 所以这里补两层判据，只对后台路径生效：
+// 所以这里补两层判据：
 //   - 请求必须不是跨站发起的（Sec-Fetch-Site / Origin）；
 //   - 未配 Key 时，Host 必须是回环名字（挡住重绑定）。
 //
@@ -335,23 +340,68 @@ func isAdminPath(p string) bool {
 	return strings.HasPrefix(p, "/api/v1/admin/")
 }
 
-// adminRequestGuard 拒绝跨站发起的后台请求。
-func (s *Server) adminRequestGuard(next http.Handler) http.Handler {
+// mutatingPath 判断这个路径是不是「会改变实例状态」的接口。
+//
+// 上一版只护了 /api/v1/admin/*，因为「破坏性操作都在后台」这个判断在当时是对的。
+// 实际不是：/api/v1/watch 的 POST/DELETE 同样能改状态——把任意域名塞进监控
+// （于是「这台机器在盯什么」被人写进去），或者把别人的监控移出（巡检悄悄停掉，
+// 却没有任何人收到通知）。而它根本不需要 Key，一个跨站 `<form>` 就够。
+// /api/v1/watch/run 更直接：每调一次就是一次全量回源，等于用别人的机器打上游。
+//
+// 判据不看 HTTP 方法：GET /api/v1/watch 本来就会被 allowMethods 拒成 405，
+// 拦在守卫这层反而少一次无意义的业务处理。
+func mutatingPath(p string) bool {
+	if isAdminPath(p) {
+		return true
+	}
+	switch p {
+	case "/api/v1/watch", "/api/v1/watch/run", "/api/v1/notify/test":
+		return true
+	}
+	return false
+}
+
+// sensitivePath 判断这个路径返回的是不是「这台机器自己的状态」。
+//
+// 它决定两件事：跨站能否发起（配合 mutatingPath），以及能否走通配 CORS。
+// 备案查询的结果（query / batch / history / verify / badge）是公开信息，
+// 别人家的前端来调本来就是设计目标；而下面这些回答的是
+// 「你在监控哪些域名、什么变了、数据文件在哪、上游配了什么」——
+// 那是一份情报，不该因为 cors 默认值写着 "*" 就交给任意站点。
+func sensitivePath(p string) bool {
+	if isAdminPath(p) {
+		return true
+	}
+	switch p {
+	case "/api/v1/stats", "/api/v1/providers",
+		"/api/v1/watch/list", "/api/v1/watch/status",
+		"/api/v1/changes", "/api/v1/changes.rss",
+		"/api/v1/notify/status":
+		return true
+	}
+	return false
+}
+
+// (s *Server) sensitivePath 让 withCommon 里能直接用方法。
+func (s *Server) sensitivePath(p string) bool { return sensitivePath(p) }
+
+// crossSiteGuard 拒绝跨站发起的状态变更请求。
+func (s *Server) crossSiteGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAdminPath(r.URL.Path) {
+		if !mutatingPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !s.adminRequestAllowed(r) {
+		if !s.crossSiteAllowed(r) {
 			writeErr(w, http.StatusForbidden, "cross_site_blocked",
-				"跨站请求不能操作后台；请在后台页面里操作，或用带 Key 的脚本调用")
+				"跨站请求不能改这台实例的状态；请在它自己的页面里操作，或用带 Key 的脚本调用")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// adminRequestAllowed 判断这次后台请求是否可以放行。
+// crossSiteAllowed 判断这次请求是否可以放行。
 //
 // 判据是 Origin：浏览器在所有「可能改变状态」的跨站请求上都会自动带上它，
 // 页面脚本改不掉。有 Origin 就必须是本站或 cors 里明确列出的域名。
@@ -362,7 +412,7 @@ func (s *Server) adminRequestGuard(next http.Handler) http.Handler {
 // Sec-Fetch-Site 只作为补充：它能在 Origin 缺失时仍标出「这是跨站来的」，
 // 而 cross-site / same-site 都该拒——evil.example.com 与 example.com 是
 // same-site，但它显然不是同一个管理台。
-func (s *Server) adminRequestAllowed(r *http.Request) bool {
+func (s *Server) crossSiteAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin != "" {
 		return s.adminOriginAllowed(origin, r.Host)
@@ -374,11 +424,11 @@ func (s *Server) adminRequestAllowed(r *http.Request) bool {
 	return true
 }
 
-// adminOriginAllowed 判断某个 Origin 是否被允许操作后台。
+// adminOriginAllowed 判断某个 Origin 是否被允许操作这台实例。
 //
-// 关键一点：**不认 `cors: ["*"]`**。通配符的意思是「我的只读接口欢迎
+// 关键一点：**不认 `cors: ["*"]`**。通配符的意思是「我的只读查询接口欢迎
 // 任何前端来调」，它绝不该被理解成「任何网站都可以删我的数据」。
-// 要让别的域名调后台，就在 cors 里把那个域名一字不差地写上。
+// 要让别的域名改状态，就在 cors 里把那个域名一字不差地写上。
 func (s *Server) adminOriginAllowed(origin, host string) bool {
 	if origin == "null" {
 		// 沙箱 iframe / file:// 页面发出来的 Origin 就是字符串 "null"，
