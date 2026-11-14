@@ -133,7 +133,9 @@ func (s *Server) Handler() http.Handler {
 	// 静态站点
 	s.mountStatic(mux)
 
-	return s.withCommon(s.logRequests(mux))
+	// 后台的跨站防护要包在最外层：它判的是「这次请求从哪个站点发起」，
+	// 与「是谁发的」是两件事，必须在进入任何 handler 之前就拦下。
+	return s.withCommon(s.logRequests(s.adminRequestGuard(mux)))
 }
 
 // logRequests 记录访问日志。

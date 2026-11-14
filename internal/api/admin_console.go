@@ -44,11 +44,6 @@ func (s *Server) withAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// adminPage 判断后台页面本身是否允许访问（页面是静态的，数据靠接口鉴权）。
-func (s *Server) adminPageAllowed(r *http.Request) bool {
-	return len(s.keys) > 0 || s.isLoopback(r)
-}
-
 // handleAdminOverview 返回后台首屏需要的全部概况。
 //
 // 合成一个接口而不是让前端打五六个：概览页一进来就要同时显示
@@ -219,7 +214,14 @@ func (s *Server) handleAdminCacheClear(w http.ResponseWriter, r *http.Request) {
 	body := struct {
 		OnlyExpired bool `json:"only_expired"`
 	}{OnlyExpired: true}
-	if r.ContentLength > 0 {
+	// 有请求体就必须读它。
+	//
+	// 判据原来只有 `r.ContentLength > 0`，而 chunked 编码的请求 ContentLength 是 -1
+	// （未知）。于是 `curl -H 'Transfer-Encoding: chunked' -d '{"only_expired":false}'`
+	// 发过来的意图被整个丢掉，默默按「只清过期」执行了——请求方要求的是全清，
+	// 收到的却是一句「已清理 0 条过期缓存」，看起来还像是成功了。
+	// 对一个不可逆操作来说，「静默换个语义执行」比直接报错危险得多。
+	if r.ContentLength != 0 || len(r.TransferEncoding) > 0 {
 		if err := decodeJSON(r, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return

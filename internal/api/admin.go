@@ -63,17 +63,22 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 
 // isLoopback 判断这次请求是不是真的从本机发起的。
 //
-// 只看 TCP 对端地址，不看任何转发头——包括开了 trust_proxy 之后。
-// 理由：文档里承诺的是「只允许本机直连」，而这个判断守护的是「能往磁盘写文件」。
-// 一旦采信转发头，任何能直接连到端口的人只要写一行 `X-Forwarded-For: 127.0.0.1`
-// 就拿到了备份能力（哪怕开了 trust_proxy，那条头也是他自己填的）。
-// 换句话说：这一条不需要「真实客户端 IP」，需要的是「你是不是从本机连过来的」，
-// 而这两件事在反向代理后面天然不同——经过反代的请求本来就不是本机直连。
+// 两条都要满足：TCP 对端是回环，且 Host 头指向本机。
+//
+//   - 不看任何转发头，包括开了 trust_proxy 之后。文档里承诺的是「只允许本机
+//     直连」，而这个判断守护的是「能往磁盘写文件」。一旦采信转发头，任何
+//     能直接连到端口的人写一行 `X-Forwarded-For: 127.0.0.1` 就拿到了备份能力。
+//   - 还要看 Host：DNS 重绑定攻击下，页面从 evil.com 加载、再让 evil.com
+//     解析到 127.0.0.1，此时 RemoteAddr 真的是回环，但 Host 是 evil.com。
+//     只查对端地址的话，那把「回环才放行」的门等于开着的。
 func (s *Server) isLoopback(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return hostIsLoopbackName(r.Host)
 }

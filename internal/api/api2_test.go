@@ -182,6 +182,7 @@ func TestAdminBackup(t *testing.T) {
 	// 模拟本机请求
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/admin/backup", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "127.0.0.1:8080"
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != 200 {
@@ -195,6 +196,7 @@ func TestAdminBackup(t *testing.T) {
 	// 路径穿越必须被拦
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/admin/backup?name=../../etc/passwd", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
+	req.Host = "127.0.0.1:8080"
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != 400 {

@@ -31,6 +31,10 @@ func adminReq(t *testing.T, h http.Handler, method, path, body string) (*http.Re
 	}
 	req := httptest.NewRequest(method, path, rd)
 	req.RemoteAddr = "127.0.0.1:54321"
+	// httptest 默认把 Host 设成 example.com，而「本机直连」的真实场景里
+	// 地址栏写的是 127.0.0.1。后台的准入判据要同时看对端地址与 Host
+	// （后者防 DNS 重绑定），所以这里必须一起模拟对。
+	req.Host = "127.0.0.1:8080"
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}

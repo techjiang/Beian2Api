@@ -511,8 +511,23 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
 curl / 脚本调用。**它们都能改数据**，所以访问控制与只读接口不同：
 
 - 配置了 API Key：必须带 Key（`X-API-Key` 头或 `?key=`）；
-- 未配置 Key：只接受真正的 TCP 回环直连（与在线备份同一套判据），
-  其余来源一律 403 `forbidden`。
+- 未配置 Key：只接受真正的本机直连——**TCP 回环 + Host 头也是回环**，
+  其余来源一律 403 `forbidden`。看 Host 是为了防 DNS 重绑定：那种攻击下
+  网络层看起来完全合法，只有 Host 会暴露出请求其实来自攻击者的域名。
+
+在此之上还有一层**跨站防护**，与有没有 Key 无关：
+
+- 带 `Origin` 且不是本站 / 不是 `cors` 里明确列出的域名 → 403 `cross_site_blocked`；
+- `Sec-Fetch-Site: cross-site` 或 `same-site` → 同上。
+
+这层不能省。`text/plain` 的 POST 不触发 CORS 预检，任何网页（甚至一个
+`<form>`）都能往 `127.0.0.1:8080` 提交一句 `{"only_expired":false}`，而
+JSON 解析不看 `Content-Type`——清空缓存、清空监控都不需要攻击者拿到 Key。
+`curl` 和脚本不带这些头，因此不受影响。
+
+另外 `cors: ["*"]` **不会**让后台跨域开放。通配符是给只读查询台的
+（别人家的前端、README 徽章），后台要跨域请在 `cors` 里写明确域名——
+它返回的是监控域名清单、缓存内容和数据文件路径。
 
 `/admin` 页面本身是公开的静态页面（里面没有任何数据），方便打开后看到
 「需要 API Key」的提示；被守住的是下面每一个接口。

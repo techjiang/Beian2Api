@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -263,7 +264,18 @@ func isPublicPath(p string) bool {
 func (s *Server) withCommon(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		if s.allowAnyOrigin {
+		// 后台接口不走「通配 CORS」。
+		//
+		// `cors: ["*"]` 的默认值是给只读查询台用的（别人家的前端、README 徽章）。
+		// 后台返回的是监控域名清单、缓存内容、数据文件路径，而且暴露它等于
+		// 让任意网站能读到「这台机器上有什么」。所以这里只认 cors 里
+		// 明确列出的域名，通配符不算——想跨域调后台，就把域名写清楚。
+		if isAdminPath(r.URL.Path) {
+			if origin := r.Header.Get("Origin"); origin != "" && s.adminOriginAllowed(origin, r.Host) {
+				h.Set("Access-Control-Allow-Origin", origin)
+				h.Set("Vary", "Origin")
+			}
+		} else if s.allowAnyOrigin {
 			h.Set("Access-Control-Allow-Origin", "*")
 		} else if origin := r.Header.Get("Origin"); origin != "" && s.originAllowed(origin) {
 			h.Set("Access-Control-Allow-Origin", origin)
@@ -290,4 +302,121 @@ func (s *Server) originAllowed(origin string) bool {
 		}
 	}
 	return false
+}
+
+// 后台接口的「谁在动手」判定。
+//
+// 上面那一层 withAdmin 管的是「这是不是管理员」——配了 Key 就验 Key，
+// 没配 Key 就要求 TCP 回环。但它回答不了一个更基础的问题：**这次请求
+// 真的是那个人自己发起的吗？**
+//
+// 浏览器里有两个洞，两个都不需要攻击者拿到 Key：
+//
+//  1. **跨站简单请求**。`text/plain` 的 POST 不触发预检，也不带凭据，
+//     于是任何一个网页（含广告位 iframe）都能往 127.0.0.1:8080 发一句
+//     `fetch('http://127.0.0.1:8080/api/v1/admin/cache/clear', {...})`。
+//     甚至不需要 JS：一个 method=POST 的 <form> 就够。而我们的 JSON 解析
+//     不看 Content-Type，`-H 'Content-Type: text/plain' -d '{"only_expired":false}'`
+//     会被照常当成 JSON 解出来——清空全部缓存、清空监控、生成备份文件，
+//     全都是这样能打通的。攻击者读不到响应，但他不需要读响应。
+//
+//  2. **DNS 重绑定**。攻击者让 evil.com 先解析到自己的服务器、把页面发下来，
+//     再把 TTL 归零改成 127.0.0.1。之后页面里的 fetch 发的就是
+//     `http://evil.com:8080/...`——它对页面来说是**同源**的，Origin 检查
+//     完全放行；而服务端看到的是 RemoteAddr=127.0.0.1，回环判据也放行。
+//     唯一露馅的地方是 Host 头：它写的是 evil.com。
+//
+// 所以这里补两层判据，只对后台路径生效：
+//   - 请求必须不是跨站发起的（Sec-Fetch-Site / Origin）；
+//   - 未配 Key 时，Host 必须是回环名字（挡住重绑定）。
+//
+// 用 curl、脚本、CI 调后台的人不受影响：它们不带这些头，也就没有「站点」身份可言。
+func isAdminPath(p string) bool {
+	return strings.HasPrefix(p, "/api/v1/admin/")
+}
+
+// adminRequestGuard 拒绝跨站发起的后台请求。
+func (s *Server) adminRequestGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAdminPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.adminRequestAllowed(r) {
+			writeErr(w, http.StatusForbidden, "cross_site_blocked",
+				"跨站请求不能操作后台；请在后台页面里操作，或用带 Key 的脚本调用")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// adminRequestAllowed 判断这次后台请求是否可以放行。
+//
+// 判据是 Origin：浏览器在所有「可能改变状态」的跨站请求上都会自动带上它，
+// 页面脚本改不掉。有 Origin 就必须是本站或 cors 里明确列出的域名。
+//
+// 没有 Origin 的请求（curl、脚本、地址栏直接打开）没有「来自哪个站点」可言，
+// 交给 withAdmin 那层判「是不是管理员」就够了。
+//
+// Sec-Fetch-Site 只作为补充：它能在 Origin 缺失时仍标出「这是跨站来的」，
+// 而 cross-site / same-site 都该拒——evil.example.com 与 example.com 是
+// same-site，但它显然不是同一个管理台。
+func (s *Server) adminRequestAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		return s.adminOriginAllowed(origin, r.Host)
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site":
+		return false
+	}
+	return true
+}
+
+// adminOriginAllowed 判断某个 Origin 是否被允许操作后台。
+//
+// 关键一点：**不认 `cors: ["*"]`**。通配符的意思是「我的只读接口欢迎
+// 任何前端来调」，它绝不该被理解成「任何网站都可以删我的数据」。
+// 要让别的域名调后台，就在 cors 里把那个域名一字不差地写上。
+func (s *Server) adminOriginAllowed(origin, host string) bool {
+	if origin == "null" {
+		// 沙箱 iframe / file:// 页面发出来的 Origin 就是字符串 "null"，
+		// 它比任何具体域名都更不该拿到后台。
+		return false
+	}
+	if u, err := url.Parse(origin); err == nil && u.Host != "" {
+		// 同源：后台页面自己发出的请求都走这一支。
+		if strings.EqualFold(u.Host, host) {
+			return true
+		}
+	}
+	for _, o := range s.origins {
+		if o != "*" && strings.EqualFold(o, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostIsLoopbackName 判断 Host 头里的主机名是不是「本机」。
+//
+// 只看主机名，不看端口。它单独存在的理由是 DNS 重绑定：那种攻击下
+// RemoteAddr 确实是 127.0.0.1（判据是真的），但 Host 说的是攻击者的域名。
+// 只接受回环地址与 localhost，是因为后台在没有 Key 时的承诺本来就是
+// 「只接受本机直连」——用局域网 IP 打开自己部署的服务，本来就在这条线之外。
+func hostIsLoopbackName(host string) bool {
+	if host == "" {
+		return false
+	}
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
