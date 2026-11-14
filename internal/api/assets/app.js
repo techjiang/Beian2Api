@@ -200,7 +200,15 @@
 
   function when(ts) {
     if (!ts) return '—';
-    var diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    var diff = Math.floor(Date.now() / 1000) - ts;
+    // 未来时间（下次巡检）不能走"刚刚"那一支，否则永远显示"刚刚"。
+    if (diff < 0) {
+      var ahead = -diff;
+      if (ahead < 60) return '1 分钟内';
+      if (ahead < 3600) return Math.round(ahead / 60) + ' 分钟后';
+      if (ahead < 86400) return Math.round(ahead / 3600) + ' 小时后';
+      return new Date(ts * 1000).toLocaleDateString('zh-CN');
+    }
     if (diff < 60) return '刚刚';
     if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
     if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
@@ -208,10 +216,26 @@
     return new Date(ts * 1000).toLocaleDateString('zh-CN');
   }
 
+  var lastStatus = null;
+  function rhythm(s) {
+    var b = $('#w-rhythm');
+    if (!b || !s) return;
+    if (!s.enabled) { b.textContent = '巡检未启用'; return; }
+    if (s.running) { b.textContent = '巡检中…'; return; }
+    var parts = [];
+    if (s.last_run_at) parts.push('上次 ' + when(s.last_run_at));
+    else parts.push('待首轮');
+    if (s.next_run_at) parts.push('下次 ' + when(s.next_run_at));
+    b.textContent = parts.length ? parts.join(' · ') : '巡检待首轮';
+    b.title = s.interval ? '每 ' + fmtDur(s.interval) + ' 巡检一轮' : '';
+  }
+
   function loadWatch() {
     if (!wList) return;
-    api('/api/v1/watch/list').then(function (d) {
+    api('/api/v1/watch/status').then(function (d) {
+      lastStatus = d;
       $('#w-total').textContent = d.total + ' 个';
+      rhythm(d);
       wList.innerHTML = '';
       if (!d.items || !d.items.length) {
         wList.appendChild(el('div', 'hint small-hint', '还没有监控域名。查询到结果后点「加入监控」，备案变更会推送给你。'));
@@ -235,6 +259,10 @@
           row.appendChild(b);
         } else if (it.last_icp) {
           row.appendChild(el('span', 'badge', it.last_icp));
+        } else if (it.last_fp) {
+          var nb = el('span', 'badge warn', '无备案');
+          nb.title = '上一次巡检时未查到备案记录';
+          row.appendChild(nb);
         }
 
         var grow = el('div', 'grow');
@@ -273,6 +301,8 @@
         domBtn.style.cssText = 'padding:0;font-size:14px;font-weight:600;color:var(--fg);background:none;border:0;cursor:pointer;font-family:inherit';
         domBtn.onclick = function () { input.value = c.domain; submit(); };
         head.appendChild(domBtn);
+        if (c.kind === 'revoked') head.appendChild(el('span', 'badge err', '注销'));
+        else if (c.kind === 'registered') head.appendChild(el('span', 'badge', '新增'));
         if (c.icp_code) head.appendChild(el('span', 'badge', c.icp_code));
         head.appendChild(el('span', 'when', when(c.at)));
         box.appendChild(head);
@@ -313,6 +343,9 @@
   var cRefresh = $('#c-refresh');
   if (cRefresh) cRefresh.onclick = loadChanges;
 
+  // 「上次 / 下次」是相对时间，隔一段时间自己走一走，不用重新拉列表。
+  setInterval(function () { rhythm(lastStatus); }, 30000);
+
   loadWatch();
   loadChanges();
 
@@ -344,6 +377,11 @@
   var input = document.getElementById('vc');
   var box = document.getElementById('vresult');
   if (!form) return;
+
+  // 414px 下完整示例占位文字会被输入框裁掉半截，换一个更短的说法。
+  if (window.matchMedia('(max-width: 480px)').matches && input.dataset.short) {
+    input.placeholder = input.dataset.short;
+  }
 
   function kv(list) {
     var dl = document.createElement('dl');

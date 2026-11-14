@@ -223,6 +223,28 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 移出巡检列表。
 
+## GET /api/v1/watch/status
+
+巡检运行概况：是否正在跑、上一轮何时结束、下一轮何时开始。首页那颗「上次/下次」标签就取自这里。
+
+```json
+{
+  "ok": true,
+  "data": {
+    "enabled": true,
+    "interval": 86400,
+    "total": 1,
+    "running": false,
+    "last_run_at": 1735776000,
+    "last_count": 1,
+    "next_run_at": 1735862400,
+    "items": [{ "...": "同 watch/list 的 items" }]
+  }
+}
+```
+
+巡检未启用时该接口依然可用，返回 `enabled=false`，不会 404。
+
 ## GET /api/v1/watch/list
 
 ```json
@@ -247,6 +269,9 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 立即执行一轮巡检，返回本次发现的变更。适合配合外部定时任务使用。
 
+巡检串行执行，同一时刻只有一轮在跑；客户端断开连接不会中断正在进行的巡检。
+服务端固定给这一轮 2 分钟执行窗口。
+
 ```json
 {
   "ok": true,
@@ -255,6 +280,7 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
     "changes": [{
       "domain": "example.com",
       "at": 1735776000,
+      "kind": "changed",
       "icp_code": "京ICP备87654321号-1",
       "diff": [{ "field": "备案号", "from": "京ICP备12345678号-1", "to": "京ICP备87654321号-1" }]
     }]
@@ -266,7 +292,11 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 ## GET /api/v1/changes
 
-最近记录的变更事件，新的在前。
+最近记录的变更事件，新的在前。每条都带 `kind` 字段：
+
+- `changed` — 备案信息本身变了
+- `revoked` — 之前有备案，现在查不到了（域名可能被注销）
+- `registered` — 之前没有备案，现在有了
 
 | 参数 | 说明 |
 | --- | --- |

@@ -257,6 +257,15 @@ footer.foot .sp { margin-left: auto; }
   .search form button { flex: 1 1 100%; }
   .res-card { padding: 14px; }
   .panel { padding: 12px; }
+  /* 小屏上「监控域名 + 数量 + 巡检节奏 + 两个按钮」一行放不下，
+     让节奏独占一行并去掉胶囊感，读起来像一句说明而不是零碎标签。 */
+  .panel-head { row-gap: 6px; }
+  .panel-title { flex: 1 1 100%; }
+  #w-rhythm {
+    background: none; border: 0; padding: 0; font-weight: 500;
+    font-size: 12px; color: var(--fg-mute);
+  }
+  .panel-acts { margin-left: 0; }
   .row { font-size: 13px; flex-wrap: wrap; row-gap: 3px; }
   .row .dom { flex: 1 1 auto; }
   .row .dom button { font-size: 13px; }

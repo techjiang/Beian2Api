@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/watch", s.withRateLimit(s.withAuth(s.handleWatch)))
 	mux.HandleFunc("/api/v1/watch/run", s.withRateLimit(s.withAuth(s.handleWatchRun)))
 	mux.HandleFunc("/api/v1/watch/list", s.withRateLimit(s.withAuth(s.handleWatchList)))
+	mux.HandleFunc("/api/v1/watch/status", s.withRateLimit(s.withAuth(s.handleWatchStatus)))
 	mux.HandleFunc("/api/v1/stats", s.withRateLimit(s.withAuth(s.handleStats)))
 	mux.HandleFunc("/api/v1/providers", s.withRateLimit(s.withAuth(s.handleProviders)))
 	mux.HandleFunc("/api/v1/changes", s.withRateLimit(s.withAuth(s.handleChanges)))

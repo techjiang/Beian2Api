@@ -131,6 +131,17 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("BEIAN2API_WEBHOOK"); v != "" {
 		c.Watch.Webhook = v
 	}
+	if v := os.Getenv("BEIAN2API_WATCH_INTERVAL"); v != "" {
+		// 支持 "6h" / "30m" / "86400" 三种写法，容器里配一行就够。
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Watch.Interval = n
+		} else if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.Watch.Interval = int(d / time.Second)
+		}
+	}
+	if v := os.Getenv("BEIAN2API_WATCH_ENABLED"); v != "" {
+		c.Watch.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
 	if v := os.Getenv("BEIAN2API_TTL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Cache.TTL = n

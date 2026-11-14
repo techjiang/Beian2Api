@@ -159,3 +159,19 @@ func TestListChangesFilterBeforeLimit(t *testing.T) {
 		t.Fatalf("过滤应先于截断，实际 %v", kept)
 	}
 }
+
+func TestSetStatIsNotIncrement(t *testing.T) {
+	st := open(t)
+	if err := st.SetStat("watch.last_run_at", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetStat("watch.last_run_at", 200); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Stat("watch.last_run_at"); got != 200 {
+		t.Fatalf("SetStat 应覆盖而非累加，实际 %d", got)
+	}
+	if got := st.Stat("nope"); got != 0 {
+		t.Fatalf("不存在的键应返回 0，实际 %d", got)
+	}
+}

@@ -1,15 +1,24 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asoe/beian2api/internal/config"
+	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/provider"
+	"github.com/asoe/beian2api/internal/service"
+	"github.com/asoe/beian2api/internal/store"
+	"github.com/asoe/beian2api/internal/watch"
 )
 
 func TestChangesAndRSS(t *testing.T) {
@@ -259,5 +268,72 @@ func TestChangesSinceNotTruncatedByLimit(t *testing.T) {
 	_, body = get(t, h, "/api/v1/changes?since=101&limit=10", nil)
 	if strings.Contains(body, "a.com") {
 		t.Fatalf("早于 since 的事件必须过滤: %s", body)
+	}
+}
+
+func TestWatchStatusEndpoint(t *testing.T) {
+	_, h := mkServer(t, nil)
+	_, body := get(t, h, "/api/v1/watch/status", nil)
+	if !strings.Contains(body, `"enabled":false`) || !strings.Contains(body, `"total":0`) {
+		t.Fatalf("未启用巡检时应如实返回: %s", body)
+	}
+}
+
+// 带巡检的 server：用于验证 watch/run 与 watch/status。
+func mkWatchServer(t *testing.T) (*Server, http.Handler, *stub) {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.LogLevel = "error"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sb := &stub{recs: []model.Record{}}
+	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
+	w := watch.New(svc, st, time.Hour, 2, "", log)
+	s := New(Options{Config: cfg, Service: svc, Watch: w, Log: log, Version: "test"})
+	return s, s.Handler(), sb
+}
+
+func TestWatchStatusWithWatcher(t *testing.T) {
+	_, h, _ := mkWatchServer(t)
+	_, body := get(t, h, "/api/v1/watch/status", nil)
+	if !strings.Contains(body, `"enabled":true`) || !strings.Contains(body, `"interval":3600`) {
+		t.Fatalf("巡检状态不对: %s", body)
+	}
+}
+
+// 客户端断开（请求 ctx 已取消）不能中断巡检：这是「点了立即巡检又关掉页面」的真实场景。
+func TestWatchRunSurvivesCanceledClient(t *testing.T) {
+	s, h, sb := mkWatchServer(t)
+	rec := model.Record{Domain: "example.com", UnitName: "示例公司", ICPCode: "京ICP备1号-1", Source: "stub", FetchedAt: model.Now()}
+	rec.Normalize()
+	sb.recs = []model.Record{rec}
+	if err := s.svc.Store().PutWatch(&store.WatchItem{Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 模拟客户端已经断开
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/watch/run", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("巡检应照常完成，实际 %d: %s", w.Code, w.Body.String())
+	}
+	item, err := s.svc.Store().GetWatch("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.LastFP == "" {
+		t.Fatal("巡检应写入基线，说明请求 ctx 取消不该中断它")
 	}
 }

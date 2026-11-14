@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaults(t *testing.T) {
@@ -106,5 +107,21 @@ func TestDump(t *testing.T) {
 	b, err := c.Dump()
 	if err != nil || len(b) == 0 {
 		t.Fatal("输出配置失败")
+	}
+}
+
+func TestWatchIntervalFromEnv(t *testing.T) {
+	t.Setenv("BEIAN2API_WATCH_INTERVAL", "6h")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WatchInterval() != 6*time.Hour {
+		t.Fatalf("6h 应解析成 6 小时，实际 %v", c.WatchInterval())
+	}
+	t.Setenv("BEIAN2API_WATCH_INTERVAL", "90")
+	c, _ = Load("")
+	if c.Watch.Interval != 90 {
+		t.Fatalf("纯数字应按秒解析，实际 %d", c.Watch.Interval)
 	}
 }

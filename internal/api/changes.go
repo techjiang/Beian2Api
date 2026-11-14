@@ -68,7 +68,7 @@ func (s *Server) handleRSS(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "<title>Beian2API 备案变更</title>\n<link>%s</link>\n<description>被监控域名的备案信息变化</description>\n", esc(base))
 	fmt.Fprintf(&b, "<lastBuildDate>%s</lastBuildDate>\n", time.Now().Format(time.RFC1123Z))
 	for _, c := range items {
-		fmt.Fprintf(&b, "<item><title>%s 备案变更</title>\n", esc(c.Domain))
+		fmt.Fprintf(&b, "<item><title>%s 备案%s</title>\n", esc(c.Domain), esc(kindWord(c.Kind)))
 		fmt.Fprintf(&b, "<link>%s/api/v1/history?domain=%s</link>\n", esc(base), esc(c.Domain))
 		fmt.Fprintf(&b, "<guid isPermaLink=\"false\">%s-%d</guid>\n", esc(c.Domain), c.At)
 		fmt.Fprintf(&b, "<pubDate>%s</pubDate>\n", time.Unix(c.At, 0).Format(time.RFC1123Z))
@@ -90,6 +90,17 @@ func diffText(c watch.Change) string {
 		parts = append(parts, fmt.Sprintf("%s：%s → %s", d.Field, dash(d.From), dash(d.To)))
 	}
 	return strings.Join(parts, "；")
+}
+
+func kindWord(kind string) string {
+	switch kind {
+	case "revoked":
+		return "注销"
+	case "registered":
+		return "新增"
+	default:
+		return "变更"
+	}
 }
 
 func dash(s string) string {

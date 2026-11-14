@@ -25,7 +25,7 @@
 | 多源竞速 | 多个数据源并行查询，谁先给出结果用谁的，失败者自动出局 |
 | 本地快照 | 上游全挂时回退到最近一次成功的数据，业务不会因为别人的故障中断 |
 | 备案号校验 | 不查上游，按编码规则逐段验真，能识别伪造的备案号 |
-| 变更巡检 | 监控域名备案变化，首页即可增删与查看变更时间线，改动通过 Webhook 或 RSS 通知你 |
+| 变更巡检 | 监控域名备案变化（含新增备案与备案注销），首页即可增删、看时间线与巡检节奏，改动通过 Webhook 或 RSS 通知你 |
 | 单文件部署 | 内嵌前端与图标，`./beian2api` 就能跑，无外部依赖 |
 
 后端 Go（标准库 + bbolt），前端零框架，全部资源编译进二进制。
@@ -120,6 +120,7 @@ curl "http://localhost:8080/api/v1/query?domain=example.com"
 | POST | `/api/v1/watch` | 加入巡检列表 |
 | DELETE | `/api/v1/watch` | 移出巡检列表 |
 | GET | `/api/v1/watch/list` | 巡检列表 |
+| GET | `/api/v1/watch/status` | 巡检运行概况（是否在跑 / 上次 / 下次） |
 | POST | `/api/v1/watch/run` | 立即执行一轮巡检 |
 | GET | `/api/v1/changes` | 变更事件流水 |
 | GET | `/api/v1/changes.rss` | 变更事件 RSS |
@@ -177,6 +178,12 @@ watch:
 
 不想配 Webhook 就用 RSS：`/api/v1/changes.rss`。
 
+三类事件都会报：备案信息变了（`changed`）、之前有备案现在查不到了（`revoked`，多半是被注销）、
+之前没备案现在有了（`registered`）。巡检间隔改了或服务重启了都不会重置节奏——
+首轮时机按「上次巡检时间 + 间隔」推算，不会因为你重启服务就额外打一轮上游。
+
+首页的监控面板会显示「上次 12 分钟前 · 下次 6 小时后」，也可以直接调 `/api/v1/watch/status`。
+
 ## 部署
 
 ### 配置
@@ -197,6 +204,8 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重，0 即禁用 |
 | `BEIAN2API_TTL` | `21600` | 缓存秒数 |
 | `BEIAN2API_WEBHOOK` | 空 | 变更推送地址 |
+| `BEIAN2API_WATCH_INTERVAL` | `86400` | 巡检间隔，支持 `30m` / `6h` / 秒数 |
+| `BEIAN2API_WATCH_ENABLED` | `true` | 是否启用自动巡检 |
 
 ### 反向代理
 

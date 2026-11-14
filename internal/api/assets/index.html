@@ -48,7 +48,7 @@
     <form id="vform" autocomplete="off">
       <label class="field">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.2-2.9 7.8-7 9-4.1-1.2-7-4.8-7-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
-        <input id="vc" type="text" placeholder="校验备案号真伪，例如 京ICP备12345678号-1" spellcheck="false" required>
+        <input id="vc" type="text" placeholder="校验备案号，如 京ICP备12345678号-1" data-short="校验备案号真伪" spellcheck="false" required>
       </label>
       <button id="vgo" type="submit" class="ghost" style="padding:13px 20px">校验</button>
     </form>
@@ -84,6 +84,7 @@
         <div class="panel-title">
           <span>监控域名</span>
           <span class="pill" id="w-total">–</span>
+          <span class="pill" id="w-rhythm" title="巡检节奏">–</span>
         </div>
         <div class="panel-acts">
           <button class="ghost small" id="w-run" type="button">立即巡检</button>

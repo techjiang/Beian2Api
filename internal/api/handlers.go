@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -229,8 +230,26 @@ func (s *Server) handleWatchRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "watch_disabled", "巡检功能未启用")
 		return
 	}
-	changes := s.watch.RunOnce(r.Context())
+	// 不能直接把请求的 ctx 交给巡检：浏览器关掉页面、代理超时都会取消它，
+	// 一轮巡检就停在中途——域名各自写了一半状态，基线也可能停在半新半旧。
+	// 巡检该跑完，请求方断连只影响它自己拿不到结果。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Minute)
+	defer cancel()
+	changes := s.watch.RunOnce(ctx)
 	writeOK(w, map[string]any{"changes": changes, "count": len(changes)})
+}
+
+// handleWatchStatus 返回巡检概况：是否在跑、上一轮何时、下一轮何时。
+func (s *Server) handleWatchStatus(w http.ResponseWriter, r *http.Request) {
+	if s.watch == nil {
+		writeOK(w, map[string]any{
+			"enabled": false, "total": 0, "interval": 0,
+			"running": false, "last_run_at": 0, "last_count": 0, "next_run_at": 0,
+			"items": []any{},
+		})
+		return
+	}
+	writeOK(w, s.watch.Status(s.cfg.Watch.Enabled))
 }
 
 // handleStats 返回运行统计。

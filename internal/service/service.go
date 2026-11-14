@@ -24,20 +24,12 @@ type Service struct {
 	tasks []provider.Task
 	log   *slog.Logger
 
-	flight sync.Map                                      // domain -> *call，用来合并并发重复查询
-	notify func(domain string, oldR, newR *model.Record) // 变更通知钩子
+	flight sync.Map // domain -> *call，用来合并并发重复查询
 }
 
 // New 构造 Service。
 func New(cfg *config.Config, st *store.Store, tasks []provider.Task, log *slog.Logger) *Service {
-	return &Service{cfg: cfg, st: st, tasks: tasks, log: log, notify: func(string, *model.Record, *model.Record) {}}
-}
-
-// SetNotifier 注册变更通知回调。
-func (s *Service) SetNotifier(fn func(domain string, oldR, newR *model.Record)) {
-	if fn != nil {
-		s.notify = fn
-	}
+	return &Service{cfg: cfg, st: st, tasks: tasks, log: log}
 }
 
 // Store 暴露底层存储（备份/统计用）。

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -183,4 +184,121 @@ func TestWebhookUnreachable(t *testing.T) {
 		t.Fatalf("推送失败不应影响变更检测，实际 %d", len(changes))
 	}
 	time.Sleep(200 * time.Millisecond)
+}
+
+// 备案被注销也是变更：上游从"有记录"变成"明确无备案"。
+// 之前这条路径直接 return，导致最该报警的变更永远检测不到。
+func TestRunOnceDetectsRevoked(t *testing.T) {
+	w, st, sb := setup(t)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("首轮只应建立基线，实际 %d", len(ch))
+	}
+	baseline, _ := st.GetWatch("example.com")
+	if baseline.LastICP == "" {
+		t.Fatal("基线应记下备案号")
+	}
+
+	sb.recs = nil // 上游明确表示无备案
+	ch := w.RunOnce(context.Background())
+	if len(ch) != 1 {
+		t.Fatalf("注销应报 1 条变更，实际 %d", len(ch))
+	}
+	if ch[0].Kind != "revoked" || ch[0].ICPCode != "" {
+		t.Fatalf("变更类型不对: %+v", ch[0])
+	}
+	if len(ch[0].Diff) == 0 || ch[0].Diff[0].To == "" {
+		t.Fatalf("应说明状态变化: %+v", ch[0].Diff)
+	}
+	item, _ := st.GetWatch("example.com")
+	if item.Changes != 1 || item.LastICP != "" {
+		t.Fatalf("监控项状态不对: %+v", item)
+	}
+
+	// 持续无备案不该反复报警
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("未再变化不应重复报警，实际 %d", len(ch))
+	}
+
+	// 域名重新备案回来，应作为新增上报
+	sb.recs = []model.Record{normalize("京ICP备3号-1", "示例公司")}
+	ch = w.RunOnce(context.Background())
+	if len(ch) != 1 || ch[0].Kind != "registered" {
+		t.Fatalf("重新备案应报新增，实际 %+v", ch)
+	}
+}
+
+// 首次巡检就没有备案：只建立基线，不能凭空报一条注销。
+func TestRunOnceFirstSeenNotFounded(t *testing.T) {
+	w, st, sb := setup(t)
+	sb.recs = nil
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("首次无备案不应报警，实际 %d", len(ch))
+	}
+	item, _ := st.GetWatch("example.com")
+	if item.LastFP != fpAbsent {
+		t.Fatalf("基线应记为无备案: %+v", item)
+	}
+}
+
+// 巡检串行：并发的两轮不会把同一次变更记两遍。
+func TestRunOnceSerialized(t *testing.T) {
+	w, st, sb := setup(t)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	w.RunOnce(context.Background())
+	sb.recs = []model.Record{normalize("京ICP备9号-1", "示例公司")}
+
+	var total int
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := len(w.RunOnce(context.Background()))
+			mu.Lock()
+			total += n
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if total != 1 {
+		t.Fatalf("同一次变更只应上报 1 次，实际 %d", total)
+	}
+	n := 0
+	_ = st.ListChanges(100, func([]byte) (bool, error) { n++; return true, nil })
+	if n != 1 {
+		t.Fatalf("变更流水应只有 1 条，实际 %d", n)
+	}
+}
+
+func TestStatusRunInfo(t *testing.T) {
+	w, st, _ := setup(t)
+	_ = st.PutWatch(&store.WatchItem{Domain: "a.com"})
+	w.setNext(1234)
+	w.RunOnce(context.Background())
+	s := w.Status(true)
+	if s.LastRunAt == 0 || s.NextRunAt != 1234 || s.Running {
+		t.Fatalf("运行信息不对: %+v", s)
+	}
+}
+
+// 重启不应该重置巡检节奏：间隔 24h、上次 1 小时前巡检过，首轮应等到 23 小时后。
+func TestFirstDelayRespectsLastRun(t *testing.T) {
+	w, st, _ := setup(t)
+	w.interval = 24 * time.Hour
+	if d := w.firstDelay(); d != time.Minute {
+		t.Fatalf("从没巡检过时应 1 分钟后首轮，实际 %v", d)
+	}
+	_ = st.SetStat(metaLastRun, model.Now()-3600)
+	d := w.firstDelay()
+	if d < 22*time.Hour || d > 23*time.Hour+time.Minute {
+		t.Fatalf("应等到约 23 小时后，实际 %v", d)
+	}
+	// 已经到期（比如停机两天），尽快补跑但不立即
+	_ = st.SetStat(metaLastRun, model.Now()-2*86400)
+	if d := w.firstDelay(); d != 30*time.Second {
+		t.Fatalf("过期后应 30 秒补跑，实际 %v", d)
+	}
 }

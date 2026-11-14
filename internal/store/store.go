@@ -307,6 +307,16 @@ func (s *Store) Incr(name string, delta int64) (int64, error) {
 	return n, err
 }
 
+// SetStat 直接写入一个整数值（不是自增），用于「上次巡检时间」这类
+// 需要跨重启保留、又不需要累加的运行态。失败只影响展示，不算致命。
+func (s *Store) SetStat(name string, v int64) error {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(v))
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMeta).Put([]byte(name), buf[:])
+	})
+}
+
 // Stat 读取计数器。
 func (s *Store) Stat(name string) int64 {
 	var n int64
