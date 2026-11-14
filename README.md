@@ -243,7 +243,7 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_LISTEN` | `:8080` | 监听地址 |
 | `BEIAN2API_DATA_DIR` | `./data` | 数据目录 |
 | `BEIAN2API_API_KEYS` | 空 | 启用鉴权的 Key，逗号分隔 |
-| `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重，0 即禁用 |
+| `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重（权重高的先起跑，0 即禁用） |
 | `BEIAN2API_TTL` | `21600` | 缓存秒数 |
 | `BEIAN2API_WEBHOOK` | 空 | 变更推送地址（单通道，等价于一个 generic 通道） |
 | `BEIAN2API_NOTIFY_CHANNELS` | 空 | 多通道推送，形如 `dingtalk:<url>,wecom:<url>` |
@@ -273,8 +273,9 @@ trust_proxy: true
 **所有数据都在一个文件里**：`data/beian2api.db`。缓存、历史快照、监控列表、变更记录全在里面。
 
 变更流水和历史快照是只增的数据，所以默认带滚动保留（`storage.retain_changes: 2000`、
-`storage.retain_history: 200` 按域名分别算，设 0 关闭裁剪）。数据文件的实际大小和这两个
-上限都会在 `/api/v1/stats` 的 `storage` 字段里，首页「服务状态」也直接显示。
+`storage.retain_history: 200` 按域名分别算，设 0 关闭裁剪）。历史快照的超限部分在写入时
+顺手裁掉，只碰该域名那一段；变更流水由每 15 秒的维护任务从最旧的一头删。数据文件的实际
+大小和这两个上限都会在 `/api/v1/stats` 的 `storage` 字段里，首页「服务状态」也直接显示。
 
 数据库用排他文件锁，所以**服务运行时外部进程打不开它**。为此提供了在线备份接口：
 

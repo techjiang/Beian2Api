@@ -317,6 +317,9 @@ func TestTrimHistoryPerDomain(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("应删掉 2 条 a.com 的旧快照，实际 %d (%v)", n, err)
 	}
+	if n, _ := s.TrimHistory(3); n != 0 {
+		t.Fatalf("已在上限内不该再删，实际删了 %d", n)
+	}
 	if h, _ := s.History("a.com", 0); len(h) != 3 {
 		t.Fatalf("a.com 应剩 3 条，实际 %d", len(h))
 	}
@@ -341,7 +344,7 @@ func TestTrimDisabledByZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.ChangesTrimmed != 0 || r.HistoryTrimmed != 0 {
+	if r.ChangesTrimmed != 0 {
 		t.Fatalf("上限为 0 时不该裁剪，实际 %+v", r)
 	}
 	if c, _ := s.Count(); c.Changes != 5 || c.History != 5 {
@@ -360,10 +363,49 @@ func TestMaintainTrimsAndFlushes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.ChangesTrimmed != 3 || r.HistoryTrimmed != 4 {
-		t.Fatalf("裁剪数量不对: %+v", r)
+	if r.ChangesTrimmed != 3 {
+		t.Fatalf("变更流水应删 3 条，实际 %+v", r)
 	}
 	if n := s.persisted("hits"); n != 7 {
 		t.Fatalf("Maintain 应顺带刷盘计数器，实际落盘 %d", n)
+	}
+}
+
+// 历史快照的超限裁剪应该在写入时就完成，别等定时维护去扫全表。
+// 否则域名上千、每域名几百条之后，那一趟扫描会跑成秒级。
+func TestAppendHistoryTrimsInline(t *testing.T) {
+	s := open(t).WithRetention(0, 3)
+	for i := 0; i < 10; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "hot.com", ICPCode: itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+		// 别的域名不该被波及：配额是按域名算的。
+		if err := s.AppendHistory(model.Record{Domain: "cold.com", ICPCode: "c" + itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c, _ := s.Count(); c.History != 6 {
+		t.Fatalf("两个域名各留 3 条，应为 6 条，实际 %d", c.History)
+	}
+	h, _ := s.History("hot.com", 0)
+	if len(h) != 3 || h[0].ICPCode != "7" || h[2].ICPCode != "9" {
+		t.Fatalf("应保留最新的 7..9，实际 %+v", h)
+	}
+	// 定时维护不该再对历史做任何事
+	if r, _ := s.Maintain(); r.ChangesTrimmed != 0 {
+		t.Fatalf("历史已在写入时裁好，维护不该再动: %+v", r)
+	}
+}
+
+// 同一时刻重复写入同一条快照仍是覆盖，不会因为裁剪逻辑而重复堆积。
+func TestAppendHistorySameInstantDedupes(t *testing.T) {
+	s := open(t).WithRetention(0, 3)
+	for i := 0; i < 5; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "a.com", ICPCode: "x", FetchedAt: 100}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c, _ := s.Count(); c.History != 1 {
+		t.Fatalf("同一时刻同内容应只有 1 条，实际 %d", c.History)
 	}
 }

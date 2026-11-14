@@ -66,14 +66,28 @@ func (s *Service) Query(ctx context.Context, rawDomain string, opts Options) (*m
 			return nil, ctx.Err()
 		}
 	}
-	defer func() {
-		s.flight.Delete(domain)
-		close(fresh.done)
+
+	// 回源跑在一个与「发起者」脱钩的 ctx 上。
+	//
+	// 之前是把发起者的 ctx 直接交给回源：第一个请求断连（关页面、代理超时），
+	// 回源被取消，结果写进 call 里——后面所有等同一个结果的请求拿到的是
+	// 一次 context canceled，明明它们自己还活着。一个浏览器的关闭能连带
+	// 打掉一批正在等同一域名的客户端。
+	//
+	// 现在发起者自己按 ctx 提前返回，回源继续跑完并把结果留给后来者。
+	// 回源本身有每个上游的超时兜底，不会无限期挂着。
+	go func() {
+		defer close(fresh.done)
+		defer s.flight.Delete(domain)
+		fresh.res, fresh.err = s.query(context.WithoutCancel(ctx), domain, opts)
 	}()
 
-	res, err := s.query(ctx, domain, opts)
-	fresh.res, fresh.err = res, err
-	return res, err
+	select {
+	case <-fresh.done:
+		return fresh.res, fresh.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *Service) query(ctx context.Context, domain string, opts Options) (*model.Result, error) {

@@ -12,9 +12,31 @@
   }
   function num(n) { return (n == null ? 0 : n).toLocaleString('zh-CN'); }
 
+  /* ---- API Key ----
+     开了 auth 的部署，所有 /api 接口都要 Key。之前网页上没有任何地方能填，
+     首页于是整片报「缺少或无效的 API Key」——配了鉴权就没法用网页了。
+     Key 存在 localStorage，随请求带在 ?key= 上；RSS 订阅链接也带上。 */
+  var KEY_STORE = 'beian2api.key';
+  function apiKey() {
+    try { return localStorage.getItem(KEY_STORE) || ''; } catch (e) { return ''; }
+  }
+  function withKey(path) {
+    var k = apiKey();
+    if (!k) return path;
+    return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'key=' + encodeURIComponent(k);
+  }
+  function needKey() {
+    var box = $('#keybox');
+    if (!box) return;
+    box.hidden = false;
+    var f = $('#k');
+    if (f && !f.value) f.value = apiKey();
+  }
+
   function api(path, opts) {
-    return fetch(path, opts).then(function (r) {
+    return fetch(withKey(path), opts).then(function (r) {
       return r.json().then(function (j) {
+        if (r.status === 401) needKey();
         if (!r.ok || j.ok === false) {
           var m = (j.error && j.error.message) || ('HTTP ' + r.status);
           throw new Error(m);
@@ -22,6 +44,27 @@
         return j.data;
       });
     });
+  }
+
+  var kform = $('#kform');
+  if (kform) {
+    kform.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = $('#k').value.trim();
+      try {
+        if (v) localStorage.setItem(KEY_STORE, v);
+        else localStorage.removeItem(KEY_STORE);
+      } catch (err) { /* 隐私模式下写不了，就当这次会话有效 */ }
+      $('#keybox').hidden = !!v;
+      refreshRSS();
+      loadStats(); loadWatch(); loadChanges(); loadNotify();
+      if (input.value.trim()) submit();
+    });
+  }
+
+  function refreshRSS() {
+    var a = $('#rss-link');
+    if (a) a.href = withKey('/api/v1/changes.rss');
   }
 
   function showError(msg) {
@@ -442,9 +485,15 @@
     loadWatch(); loadChanges(); loadNotify();
   }, 60000);
 
+  refreshRSS();
   loadWatch();
   loadChanges();
   loadNotify();
+
+  // 已经存着 Key 但服务端还没要求时，先探一次：这样「Key 失效」也能被及时发现。
+  if (apiKey()) {
+    api('/api/v1/stats').then(function () { $('#keybox').hidden = true; }).catch(function () {});
+  }
 
   var snippets = {
     curl: 'curl "' + location.origin + '/api/v1/query?domain=example.com"\n\n# 强制回源\ncurl "' + location.origin + '/api/v1/query?domain=example.com&refresh=1"\n\n# 批量\ncurl -X POST "' + location.origin + '/api/v1/batch" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"domains":["qq.com","baidu.com"]}\'',
@@ -551,7 +600,7 @@
     var v = input.value.trim();
     if (!v) return;
     box.innerHTML = '<div class="hint">校验中…</div>';
-    fetch('/api/v1/verify?code=' + encodeURIComponent(v))
+    fetch(withKey('/api/v1/verify?code=' + encodeURIComponent(v)))
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (!j.ok) throw new Error((j.error && j.error.message) || '校验失败');

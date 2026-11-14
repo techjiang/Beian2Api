@@ -122,6 +122,30 @@ type Outcome struct {
 	Errors    map[string]string
 }
 
+// hedgeStep 是「权重落后多少」对应的起跑延迟上限。
+//
+// 权重原来是纯装饰：配置里写着「weight 越大越优先」，竞速里却完全不看它，
+// 所有源同时起跑、谁快谁赢。于是把官方源的权重调到 100、备用源 40，
+// 效果和把两者设成一样没有区别。
+//
+// 现在低权重的源晚一点起跑：权重最高的立刻出发，其余按权重差按比例延后，
+// 最大不超过 hedgeStep。这是对冲（hedging）而不是排队——高权重源慢了或者
+// 挂了，后面的源照样会出发，只是让位一小会儿。权重全相等时延迟为 0，
+// 「所有源同时竞速」的行为完全不变。
+var hedgeStep = 200 * time.Millisecond
+
+// hedgeDelay 计算某个权重相对最高权重的起跑延迟。
+func hedgeDelay(weight, maxWeight int) time.Duration {
+	if maxWeight <= 0 || weight >= maxWeight || weight <= 0 {
+		return 0
+	}
+	step := hedgeStep * time.Duration(maxWeight-weight) / time.Duration(maxWeight)
+	if step < 0 {
+		return 0
+	}
+	return step
+}
+
 // Race 并行查询多个上游，返回第一个拿到数据的答案。
 //
 // 语义划分很关键：
@@ -145,6 +169,13 @@ func Race(ctx context.Context, domain string, tasks []Task) Outcome {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	maxWeight := 0
+	for _, t := range tasks {
+		if t.Weight > maxWeight {
+			maxWeight = t.Weight
+		}
+	}
+
 	for _, t := range tasks {
 		go func(t Task) {
 			tctx := cctx
@@ -152,6 +183,15 @@ func Race(ctx context.Context, domain string, tasks []Task) Outcome {
 				var c context.CancelFunc
 				tctx, c = context.WithTimeout(cctx, t.Timeout)
 				defer c()
+			}
+			// 低权重源让位一小会儿，见 hedgeDelay 的注释。
+			if d := hedgeDelay(t.Weight, maxWeight); d > 0 {
+				select {
+				case <-time.After(d):
+				case <-tctx.Done():
+					ch <- reply{name: t.Provider.Name(), err: tctx.Err()}
+					return
+				}
 			}
 			recs, err := t.Provider.Lookup(tctx, domain)
 			ch <- reply{name: t.Provider.Name(), records: recs, err: err}

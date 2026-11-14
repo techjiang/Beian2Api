@@ -123,6 +123,14 @@ func OpenFile(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// 老版本的历史快照没有上限，可能早就堆了上千条。这里清一次，
+	// 之后由 AppendHistory 在写入时就地裁，不必再全表扫。
+	if s.retainHistory > 0 {
+		if _, err := s.TrimHistory(0); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("初始化历史快照保留上限: %w", err)
+		}
+	}
 	return s, nil
 }
 
@@ -179,6 +187,10 @@ func (s *Store) DeleteCache(domain string) error {
 // key 里带天 + 时间戳 + 指纹前缀：只用「域名+天」会互相覆盖——
 // 同一天里备案改了两次，第一次的快照会被第二次顶掉，历史里就只剩最后一版，
 // 期间那次变更（以及它的 diff）永久丢失。这是只有一天多改几次才会踩到的坑。
+//
+// 写入后顺手把该域名的超限快照裁掉，和这次写共用同一个事务。理由有两条：
+// 一是裁剪是 O(该域名的条数) 而不是 O(全表)，几乎不要钱；二是同一事务里做完，
+// 不会多出一次 fsync。
 func (s *Store) AppendHistory(r model.Record) error {
 	day := time.Unix(r.FetchedAt, 0).Format("20060102")
 	fp := r.Fingerprint()
@@ -191,8 +203,37 @@ func (s *Store) AppendHistory(r model.Record) error {
 		return err
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketHistory).Put(key, b)
+		bk := tx.Bucket(bucketHistory)
+		if err := bk.Put(key, b); err != nil {
+			return err
+		}
+		return trimHistoryDomain(bk, r.Domain, s.retainHistory)
 	})
+}
+
+// trimHistoryDomain 把某个域名的历史快照裁到最近 keep 条（keep<=0 表示不裁）。
+//
+// 用 cursor 从该域名的 key 前缀走一遍，只碰自己的那一段，
+// 不扫全表——这是它和 TrimHistory 的区别，也是它能放进写入路径的原因。
+func trimHistoryDomain(b *bolt.Bucket, domain string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	prefix := []byte(domain + "\x00")
+	var keys [][]byte
+	c := b.Cursor()
+	for k, _ := c.Seek(prefix); k != nil && hasPrefix(k, prefix); k, _ = c.Next() {
+		keys = append(keys, append([]byte(nil), k...))
+	}
+	if len(keys) <= keep {
+		return nil
+	}
+	for _, k := range keys[:len(keys)-keep] {
+		if err := b.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // History 返回某域名的历史快照，按时间升序。
@@ -525,6 +566,10 @@ func (s *Store) TrimChanges(keep int) (int, error) {
 //
 // 按域名分别计数，不是全局：配额按 IP 分和按总量分是完全不同的语义，
 // 全局上限会让一个高频域名把其他域名的历史全挤掉。
+//
+// 这个方法要扫全表，所以不在定时维护里跑：正常写入由 AppendHistory 自己
+// 顺手裁掉超限的那几条（只碰该域名的前缀，O(该域名条数)）。留在这里是给
+// **升级迁移**用的——老版本写进来的数据可能早就超限，启动时清一次即可。
 func (s *Store) TrimHistory(keep int) (int, error) {
 	if keep <= 0 {
 		keep = s.retainHistory
@@ -568,8 +613,11 @@ func (s *Store) TrimHistory(keep int) (int, error) {
 	return removed, err
 }
 
-// Maintain 做一轮存储维护：刷盘计数器 + 按上限裁剪只增数据。
+// Maintain 做一轮存储维护：刷盘计数器 + 裁剪变更流水。
 // 由服务定时调用，也在退出前调一次。
+//
+// 这里不裁历史快照：那个操作要扫全表，曾经是「每 15 秒按域名全表分组」，
+// 域名上千之后会跑成秒级。历史改成写入时就地裁（见 AppendHistory）。
 func (s *Store) Maintain() (MaintResult, error) {
 	var r MaintResult
 	if err := s.Flush(); err != nil {
@@ -577,18 +625,12 @@ func (s *Store) Maintain() (MaintResult, error) {
 	}
 	n, err := s.TrimChanges(0)
 	r.ChangesTrimmed = n
-	if err != nil {
-		return r, err
-	}
-	n, err = s.TrimHistory(0)
-	r.HistoryTrimmed = n
 	return r, err
 }
 
 // MaintResult 是一次维护的结果。
 type MaintResult struct {
 	ChangesTrimmed int `json:"changes_trimmed"`
-	HistoryTrimmed int `json:"history_trimmed"`
 }
 
 // AppendChange 记录一条变更事件，key 按时间倒序可遍历。

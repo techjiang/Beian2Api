@@ -78,7 +78,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/stats", s.withRateLimit(s.withAuth(s.handleStats)))
 	mux.HandleFunc("/api/v1/providers", s.withRateLimit(s.withAuth(s.handleProviders)))
 	mux.HandleFunc("/api/v1/changes", s.withRateLimit(s.withAuth(s.handleChanges)))
-	mux.HandleFunc("/api/v1/changes.rss", s.handleRSS)
+	// RSS 也要过鉴权：它列的是「你在监控哪些域名」，这本身就是一份情报。
+	// 之前这里没包 withAuth，开了 API Key 的部署，变更流水照样对全网公开。
+	// RSS 阅读器不方便带请求头，但 withAuth 认 ?key=，订阅地址里带上即可。
+	mux.HandleFunc("/api/v1/changes.rss", s.withRateLimit(s.withAuth(s.handleRSS)))
 	mux.HandleFunc("/api/v1/notify/status", s.withRateLimit(s.withAuth(s.handleNotifyStatus)))
 	mux.HandleFunc("/api/v1/notify/test", s.withRateLimit(s.withAuth(s.handleNotifyTest)))
 	mux.HandleFunc("/api/v1/verify", s.withRateLimit(s.withAuth(s.handleVerify)))

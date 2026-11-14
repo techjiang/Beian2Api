@@ -237,8 +237,8 @@ func cmdServe(args []string) error {
 			case <-t.C:
 				if r, err := st.Maintain(); err != nil {
 					log.Warn("存储维护失败", "err", err)
-				} else if r.ChangesTrimmed > 0 || r.HistoryTrimmed > 0 {
-					log.Info("存储裁剪完成", "changes", r.ChangesTrimmed, "history", r.HistoryTrimmed)
+				} else if r.ChangesTrimmed > 0 {
+					log.Info("变更流水裁剪完成", "changes", r.ChangesTrimmed)
 				}
 			}
 		}

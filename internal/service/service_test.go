@@ -211,3 +211,51 @@ func TestRecordHistoryPicksSmallestSiteSeq(t *testing.T) {
 		t.Fatalf("历史应取站点序号最小的记录，实际 %+v", hist)
 	}
 }
+
+// 同一个域名的并发请求合并成一次上游调用；但如果发起者自己断连了，
+// 不能把「它不等了」变成所有人一起失败。
+//
+// 这是真实场景：一个用户关掉页面，回源被 ctx 取消，结果写进 call，
+// 后面所有等同一个结果的请求拿到的都是 context canceled。
+func TestSingleflightLeaderCancelDoesNotPoisonFollowers(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备1号-1")}, delay: 120 * time.Millisecond}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	type res struct {
+		r   *model.Result
+		err error
+	}
+	leaderCh := make(chan res, 1)
+	go func() {
+		r, err := svc.Query(leaderCtx, "example.com", Options{})
+		leaderCh <- res{r, err}
+	}()
+
+	// 等回源真的开始了，再让 follower 加入同一个单飞。
+	time.Sleep(30 * time.Millisecond)
+	followerCh := make(chan res, 1)
+	go func() {
+		r, err := svc.Query(context.Background(), "example.com", Options{})
+		followerCh <- res{r, err}
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancelLeader() // 第一个请求的客户端走了
+
+	lr := <-leaderCh
+	if lr.err == nil {
+		t.Fatal("发起者自己断连，应该拿到 ctx 错误")
+	}
+
+	fr := <-followerCh
+	if fr.err != nil {
+		t.Fatalf("发起者断连不该连带打掉其他等待者，实际 %v", fr.err)
+	}
+	if fr.r == nil || !fr.r.Found || fr.r.Records[0].ICPCode != "京ICP备1号-1" {
+		t.Fatalf("等待者应拿到正常的查询结果，实际 %+v", fr.r)
+	}
+	if n := s.calls.Load(); n != 1 {
+		t.Fatalf("合并后上游只应被调用一次，实际 %d", n)
+	}
+}

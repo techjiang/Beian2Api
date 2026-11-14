@@ -534,3 +534,38 @@ func TestStatsExposeStorage(t *testing.T) {
 		t.Fatalf("stats 应暴露数据文件大小: %s", body)
 	}
 }
+
+// 变更流水是「你在监控哪些域名」的清单，开了 API Key 之后它不能还公开。
+func TestRSSRequiresKeyWhenAuthEnabled(t *testing.T) {
+	s, h := mkServer(t, func(c *config.Config) {
+		c.Auth.Enabled = true
+		c.Auth.Keys = []string{"bk_test"}
+	})
+	_ = s.svc.Store().AppendChange("0000000001-a.com", map[string]any{"domain": "a.com", "at": 100})
+
+	resp, body := get(t, h, "/api/v1/changes.rss", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("未带 Key 时应 401，实际 %d: %s", resp.StatusCode, body)
+	}
+	if strings.Contains(body, "a.com") {
+		t.Fatal("401 时不该泄露任何域名")
+	}
+
+	// RSS 阅读器塞不了请求头，但 ?key= 是认的——订阅地址里带上即可。
+	resp, body = get(t, h, "/api/v1/changes.rss?key=bk_test", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "a.com") {
+		t.Fatalf("带 Key 时应正常输出，实际 %d: %s", resp.StatusCode, body)
+	}
+}
+
+// 开了鉴权之后首页仍然是公开的（要用它填 Key），只是 /api 全部要 Key。
+func TestIndexStaysPublicWithAuth(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) {
+		c.Auth.Enabled = true
+		c.Auth.Keys = []string{"bk_test"}
+	})
+	resp, body := get(t, h, "/", nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "keybox") {
+		t.Fatalf("首页应可访问且带 API Key 输入框，实际 %d", resp.StatusCode)
+	}
+}

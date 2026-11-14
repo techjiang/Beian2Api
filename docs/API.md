@@ -320,6 +320,13 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 同样的变更事件，输出 RSS 2.0，可直接丢进 RSS 阅读器或 IM 订阅机器人。
 
+启用 API Key 后，这个接口同样需要鉴权——变更流水等于「你在监控哪些域名」的清单，
+不该对全网公开。RSS 阅读器不方便加请求头，所以订阅地址里带上 `?key=` 即可：
+
+```
+http://localhost:8080/api/v1/changes.rss?key=bk_xxx
+```
+
 ---
 
 ## GET /api/v1/notify/status
@@ -454,6 +461,10 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
 
 各数据源的启用状态、权重与超时配置。
 
+权重会实际影响竞速：权重最高的源立刻出发，其余按权重差按比例延后起跑
+（最多 200ms）。这是对冲而不是排队——高权重源慢了或者挂了，低权重源照样接手，
+只是让它先跑一小会儿。权重全相等时延迟为 0，回到「同时竞速、谁快谁赢」。
+
 ## GET /healthz / GET /readyz
 
 健康探针。`healthz` 始终快速返回进程存活，`readyz` 会检查存储是否可读。
@@ -476,7 +487,11 @@ curl "...&key=bk_xxx"
 ./beian2api keygen -n 3
 ```
 
-限流按客户端 IP 做令牌桶，默认 20 rps / burst 60。被限时返回 429 与 `Retry-After`。健康检查、静态资源、徽章与 RSS 不受限流影响。
+开了鉴权之后网页仍然可以正常用：首页依旧是公开的，检测到 401 时会露出一个
+API Key 输入框，填一次就存在浏览器本地，后续请求自动带上。
+
+限流按客户端 IP 做令牌桶，默认 20 rps / burst 60。被限时返回 429 与 `Retry-After`。
+健康检查与静态页面不受限流影响；`/api` 与 `/badge` 都算。
 
 ## CORS
 

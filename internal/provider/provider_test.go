@@ -126,3 +126,65 @@ func TestRaceCallerCancelled(t *testing.T) {
 		t.Fatalf("取消后应立刻返回，实际等了 %v", d)
 	}
 }
+
+// 权重不是装饰：配置里写着「weight 越大越优先」，就得真的优先。
+//
+// 之前所有源同时起跑、纯看谁快，把官方源权重调到 100、备用源 40 毫无意义。
+// 现在低权重源让位一小会儿（对冲，不是排队）：高权重源慢了照样有人接手。
+func TestRacePrefersHigherWeight(t *testing.T) {
+	defer func(old time.Duration) { hedgeStep = old }(hedgeStep)
+	hedgeStep = 120 * time.Millisecond
+
+	// 高权重源慢一点，低权重源很快：让位窗口内不该抢跑。
+	tasks := []Task{
+		{Provider: &fake{name: "primary", delay: 40 * time.Millisecond, recs: recs("PRIMARY")}, Weight: 100, Timeout: time.Second},
+		{Provider: &fake{name: "backup", delay: 5 * time.Millisecond, recs: recs("BACKUP")}, Weight: 20, Timeout: time.Second},
+	}
+	out := Race(context.Background(), "example.com", tasks)
+	if out.Source != "primary" {
+		t.Fatalf("高权重源在让位窗口内能给出结果，就该用它的，实际 %q", out.Source)
+	}
+}
+
+func TestRaceBackupStillTakesOver(t *testing.T) {
+	defer func(old time.Duration) { hedgeStep = old }(hedgeStep)
+	hedgeStep = 60 * time.Millisecond
+
+	// 高权重源卡死：低权重源延后起跑，但必须接手，不能干等。
+	tasks := []Task{
+		{Provider: &fake{name: "primary", delay: 5 * time.Second}, Weight: 100, Timeout: 800 * time.Millisecond},
+		{Provider: &fake{name: "backup", delay: 5 * time.Millisecond, recs: recs("BACKUP")}, Weight: 10, Timeout: time.Second},
+	}
+	start := time.Now()
+	out := Race(context.Background(), "example.com", tasks)
+	if out.Source != "backup" {
+		t.Fatalf("高权重源挂了，低权重源应接手，实际 %+v", out)
+	}
+	if d := time.Since(start); d > 400*time.Millisecond {
+		t.Fatalf("不该等满高权重源的超时，耗时 %v", d)
+	}
+}
+
+func TestHedgeDelay(t *testing.T) {
+	defer func(old time.Duration) { hedgeStep = old }(hedgeStep)
+	hedgeStep = 200 * time.Millisecond
+
+	cases := []struct {
+		weight, max int
+		want        time.Duration
+	}{
+		{100, 100, 0}, // 最高权重立刻出发
+		{100, 40, 0},  // 高于最高权重（异常配置）也不该有负延迟
+		{0, 100, 0},   // 无权重信息视为不延后
+		{50, 100, 100 * time.Millisecond},
+		{1, 100, 198 * time.Millisecond},
+	}
+	for _, c := range cases {
+		if got := hedgeDelay(c.weight, c.max); got != c.want {
+			t.Fatalf("hedgeDelay(%d,%d) = %v，期望 %v", c.weight, c.max, got, c.want)
+		}
+	}
+	if got := hedgeDelay(100, 0); got != 0 {
+		t.Fatalf("没有权重信息时不该延后，实际 %v", got)
+	}
+}
