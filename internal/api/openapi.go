@@ -200,6 +200,93 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 				"tags":        []string{"推送"},
 				"responses":   withErr(map[string]any{"503": map[string]any{"description": "未配置任何推送通道"}}),
 			}},
+			// 后台管理。破坏性操作要求在真实响应里被说清楚：
+			// 照这份描述生成的客户端如果以为「删缓存」是幂等 GET，
+			// 那就是这份文档的错，不是生成器的错。
+			"/api/v1/admin/overview": map[string]any{"get": map[string]any{
+				"summary":     "后台概览：数据量、上游、巡检、推送、存储策略",
+				"description": "配了 API Key 时必须携带；没配 Key 时只接受本机直连。",
+				"tags":        []string{"后台"},
+				"responses":   withErr(map[string]any{"403": map[string]any{"description": "未配 Key 且非本机直连"}}),
+			}},
+			"/api/v1/admin/cache": map[string]any{
+				"get": map[string]any{
+					"summary":    "列出缓存（可按关键词过滤）",
+					"tags":       []string{"后台"},
+					"parameters": []map[string]any{q("limit", integer("每页条数，默认 30，最大 200"), false), q("offset", integer("跳过条数"), false), q("q", str("在域名/备案号/主办单位上做子串匹配"), false)},
+					"responses":  withErr(),
+				},
+				"delete": map[string]any{
+					"summary":    "删除某个域名的缓存",
+					"tags":       []string{"后台"},
+					"parameters": []map[string]any{domainParam},
+					"responses":  withErr(),
+				},
+			},
+			"/api/v1/admin/cache/clear": map[string]any{"post": map[string]any{
+				"summary":     "清理缓存：only_expired=true 只删超出回退窗口的，false 全清",
+				"description": "空 body 等价于 only_expired=true：不带参数的请求不该造成不可逆后果。",
+				"tags":        []string{"后台"},
+				"requestBody": map[string]any{"required": false, "content": map[string]any{"application/json": map[string]any{
+					"schema": map[string]any{"type": "object", "properties": map[string]any{
+						"only_expired": boolean("只清已过期且超出回退窗口的条目"),
+					}},
+				}}},
+				"responses": withErr(),
+			}},
+			"/api/v1/admin/history": map[string]any{
+				"get": map[string]any{
+					"summary":    "按域名聚合历史快照（快照数、最近一次、占用配额）",
+					"tags":       []string{"后台"},
+					"parameters": []map[string]any{q("limit", integer("每页条数，默认 30，最大 200"), false), q("offset", integer("跳过条数"), false), q("q", str("域名/备案号/主办单位"), false)},
+					"responses":  withErr(),
+				},
+				"delete": map[string]any{
+					"summary":    "删除某个域名的全部历史快照",
+					"tags":       []string{"后台"},
+					"parameters": []map[string]any{domainParam},
+					"responses":  withErr(),
+				},
+			},
+			"/api/v1/admin/changes": map[string]any{"delete": map[string]any{
+				"summary":    "删除一条变更流水（按 at + domain 定位）",
+				"tags":       []string{"后台"},
+				"parameters": []map[string]any{q("at", integer("事件时间戳（Unix 秒）"), true), domainParam},
+				"responses":  withErr(),
+			}},
+			"/api/v1/admin/changes/clear": map[string]any{"post": map[string]any{
+				"summary":   "清空全部变更流水",
+				"tags":      []string{"后台"},
+				"responses": withErr(),
+			}},
+			"/api/v1/admin/watch/bulk": map[string]any{"post": map[string]any{
+				"summary": "批量加入或移出监控（单次最多 500 个，自动归一化与去重）",
+				"tags":    []string{"后台"},
+				"requestBody": map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{
+					"schema": map[string]any{"type": "object", "required": []string{"domains"}, "properties": map[string]any{
+						"domains": map[string]any{"type": "array", "items": map[string]string{"type": "string"}},
+						"action":  str("add（默认）或 remove"),
+					}},
+				}}},
+				"responses": withErr(),
+			}},
+			"/api/v1/admin/watch/purge": map[string]any{"post": map[string]any{
+				"summary":   "清空监控列表",
+				"tags":      []string{"后台"},
+				"responses": withErr(),
+			}},
+			"/api/v1/admin/backups": map[string]any{
+				"get": map[string]any{
+					"summary":   "列出 backups 目录里的快照文件",
+					"tags":      []string{"后台"},
+					"responses": withErr(),
+				},
+				"delete": map[string]any{
+					"summary":   "删除 backups 目录里的全部 .db 快照",
+					"tags":      []string{"后台"},
+					"responses": withErr(),
+				},
+			},
 			"/api/v1/stats": map[string]any{"get": map[string]any{
 				"summary":   "运行统计、缓存命中率、存储占用与保留策略",
 				"tags":      []string{"运维"},

@@ -177,36 +177,16 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid_domain", "域名格式不正确")
 			return
 		}
-		// 首次加入时抓取一次建立基线，否则第一次巡检会把"全部字段"误报成变更。
-		_, _ = s.svc.Query(r.Context(), d, service.Options{})
-
-		now := model.Now()
-		item := &store.WatchItem{Domain: d, AddedAt: now, CheckedAt: now}
-		// 重复添加时保留已有的基线、计数与加入时间，只刷新抓取时间，
-		// 否则用户手滑点两次就把变更计数清零了。
-		if old, err := s.svc.Store().GetWatch(d); err == nil {
-			item.AddedAt = old.AddedAt
-			item.Changes = old.Changes
-			item.LastFP = old.LastFP
-			item.LastICP = old.LastICP
-			// 故障状态也要一起保留：重复点「加入监控」不该让一个
-			// 已经连续失败十轮的域名重新开始计数、再收到一条重复告警。
-			item.FailStreak = old.FailStreak
-			item.Alerted = old.Alerted
-			item.LastOKAt = old.LastOKAt
-			item.LastError = old.LastError
-		}
-		if item.LastFP == "" {
-			if hist, _ := s.svc.History(d, 1); len(hist) > 0 {
-				item.LastFP = hist[len(hist)-1].Fingerprint()
-				item.LastICP = hist[len(hist)-1].ICPCode
-			}
-		}
-		if err := s.svc.Store().PutWatch(item); err != nil {
+		if err := s.addWatch(r, d); err != nil {
 			writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
-		writeOK(w, map[string]any{"domain": d, "watching": true, "baseline_icp": item.LastICP})
+		item, _ := s.svc.Store().GetWatch(d)
+		baseline := ""
+		if item != nil {
+			baseline = item.LastICP
+		}
+		writeOK(w, map[string]any{"domain": d, "watching": true, "baseline_icp": baseline})
 	case http.MethodDelete:
 		d := model.CanonicalDomain(r.URL.Query().Get("domain"))
 		if d == "" {
@@ -221,6 +201,42 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 POST / DELETE")
 	}
+}
+
+// addWatch 加入监控：先抓一次建立基线，再落库；重复添加时保留已有进度。
+//
+// 抽出来是因为后台的「批量加监控」也要走同一条路。如果那边自己写一份，
+// 迟早会出现「批量加的域名第一轮巡检全部报变更」——因为漏了建基线这一步，
+// 而这种错在界面上只表现为一堆莫名其妙的告警。
+func (s *Server) addWatch(r *http.Request, d string) error {
+	// 首次加入时抓取一次建立基线，否则第一次巡检会把"全部字段"误报成变更。
+	// 抓取失败不阻断：上游不可用时仍然允许先把域名挂进列表，
+	// 基线留空，等第一轮成功抓取时由巡检自己补上。
+	_, _ = s.svc.Query(r.Context(), d, service.Options{})
+
+	now := model.Now()
+	item := &store.WatchItem{Domain: d, AddedAt: now, CheckedAt: now}
+	// 重复添加时保留已有的基线、计数与加入时间，只刷新抓取时间，
+	// 否则用户手滑点两次就把变更计数清零了。
+	if old, err := s.svc.Store().GetWatch(d); err == nil {
+		item.AddedAt = old.AddedAt
+		item.Changes = old.Changes
+		item.LastFP = old.LastFP
+		item.LastICP = old.LastICP
+		// 故障状态也要一起保留：重复点「加入监控」不该让一个
+		// 已经连续失败十轮的域名重新开始计数、再收到一条重复告警。
+		item.FailStreak = old.FailStreak
+		item.Alerted = old.Alerted
+		item.LastOKAt = old.LastOKAt
+		item.LastError = old.LastError
+	}
+	if item.LastFP == "" {
+		if hist, _ := s.svc.History(d, 1); len(hist) > 0 {
+			item.LastFP = hist[len(hist)-1].Fingerprint()
+			item.LastICP = hist[len(hist)-1].ICPCode
+		}
+	}
+	return s.svc.Store().PutWatch(item)
 }
 
 // handleWatchList 列出监控项。

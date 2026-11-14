@@ -18,7 +18,10 @@ var assets embed.FS
 // 这样升级二进制后浏览器会自动拿新文件，不会出现「改了样式用户看不到」。
 var assetVersion = func() string {
 	h := sha256.New()
-	for _, name := range []string{"style.css", "app.js"} {
+	// 指纹必须覆盖**所有**前端资源。只算 style.css / app.js 的话，
+	// 改后台的 admin.css / admin.js 不会让 ?v= 变，浏览器那头吃 7 天的
+	// immutable 缓存，升级后看不到任何变化——而人只会说「你没改吧」。
+	for _, name := range []string{"style.css", "app.js", "admin.css", "admin.js"} {
 		if b, err := assets.ReadFile("assets/" + name); err == nil {
 			h.Write(b)
 		}
@@ -42,6 +45,7 @@ func (s *Server) mountStatic(mux *http.ServeMux) {
 	mux.Handle("/assets/", cacheHeader(http.StripPrefix("/assets/", fileServer)))
 
 	indexRaw, _ := fs.ReadFile(sub, "index.html")
+	adminRaw, _ := fs.ReadFile(sub, "admin.html")
 	docsRaw, _ := fs.ReadFile(sub, "docs.html")
 	logo, _ := fs.ReadFile(sub, "logo.svg")
 	icon, _ := fs.ReadFile(sub, "apple-touch-icon.png")
@@ -65,6 +69,16 @@ func (s *Server) mountStatic(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=60")
 		_, _ = w.Write(withVersion(indexRaw))
+	})
+	// 后台页面本身是静态的，数据全靠 /api/v1/admin/* 鉴权。
+	//
+	// 为什么页面不做成「配了 Key 才返回」：页面里没有任何数据，
+	// 拦它只会让人打不开自己的后台、也看不到那句「需要 API Key」的提示。
+	// 真正的门在后面每个接口上——那才是数据所在的地方。
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		_, _ = w.Write(withVersion(adminRaw))
 	})
 	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

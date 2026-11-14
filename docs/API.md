@@ -505,6 +505,142 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
 
 ---
 
+## 后台管理接口
+
+浏览器打开 `/admin` 就是后台页面。以下接口是它背后的数据源，也可以直接用
+curl / 脚本调用。**它们都能改数据**，所以访问控制与只读接口不同：
+
+- 配置了 API Key：必须带 Key（`X-API-Key` 头或 `?key=`）；
+- 未配置 Key：只接受真正的 TCP 回环直连（与在线备份同一套判据），
+  其余来源一律 403 `forbidden`。
+
+`/admin` 页面本身是公开的静态页面（里面没有任何数据），方便打开后看到
+「需要 API Key」的提示；被守住的是下面每一个接口。
+
+### GET /api/v1/admin/overview
+
+概览页一次取全：数据量、命中率、存储策略、上游、巡检节奏、推送状态、备份列表。
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/admin/overview"
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "version": "1.10.0",
+    "uptime_sec": 3612,
+    "counts": { "cache": 1240, "history": 3871, "watch": 22, "changes": 96, "notify": 3, "keys": 0 },
+    "requests": { "cache_hits": 18420, "cache_misses": 1203, "stale_fallbacks": 4, "hit_rate": 93.9 },
+    "storage": {
+      "size_bytes": 4718592, "path": "./data/beian2api.db",
+      "retain_changes": 2000, "retain_history": 200,
+      "retain_history_total": 20000, "stale_window": 604800, "history_total": 3871
+    },
+    "providers": [{ "name": "miit", "enabled": true, "weight": 100, "timeout": 8, "custom_credential": false }],
+    "watch": { "enabled": true, "interval": 86400, "total": 22, "running": false,
+               "last_run_at": 1735689600, "last_count": 1, "next_run_at": 1735776000 },
+    "notify": [{ "name": "ops", "kind": "dingtalk", "last_at": 1735689500, "last_ok": true }],
+    "backups": [{ "name": "beian2api-20241114-120000.db", "size": 4718592, "created_at": 1735689600 }],
+    "auth": { "enabled": false }
+  }
+}
+```
+
+### 缓存
+
+```bash
+# 列表：limit 默认 30（上限 200），q 在域名/备案号/主办单位上做子串匹配
+curl "http://127.0.0.1:8080/api/v1/admin/cache?q=example&limit=30&offset=0"
+
+# 删一个域名（会做 canonical 归一化，用 www 版本删也能删到主域名那条）
+curl -X DELETE "http://127.0.0.1:8080/api/v1/admin/cache?domain=example.com"
+
+# 清理：only_expired=true 只删「已过期且超出回退窗口」的，false 全清
+curl -X POST "http://127.0.0.1:8080/api/v1/admin/cache/clear" \
+  -H 'Content-Type: application/json' -d '{"only_expired":true}'
+```
+
+**空 body 等价于 `only_expired:true`**：不带参数的请求不该造成不可逆后果。
+全清会连回退快照一起删掉，上游一挂就没有兜底数据了。
+
+### 历史快照
+
+按域名聚合，一个域名几百条快照只占一行。
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/admin/history?limit=30&offset=0"
+curl -X DELETE "http://127.0.0.1:8080/api/v1/admin/history?domain=example.com"
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "total": 1, "offset": 0, "limit": 30, "has_more": false,
+    "items": [{
+      "domain": "example.com", "count": 42, "oldest_at": 1730000000,
+      "last_at": 1735689600, "last_icp": "京ICP备12345678号-1",
+      "last_unit": "示例科技有限公司", "kept_limit": 200
+    }]
+  }
+}
+```
+
+`kept_limit` 是单域名保留上限，用来算「这个域名快把配额用满了没有」。
+
+### 变更流水
+
+```bash
+# 按条删除，at 是事件时间戳（`at` 与 `domain` 两个参数都必需）
+curl -X DELETE "http://127.0.0.1:8080/api/v1/admin/changes?at=1735689600&domain=example.com"
+
+# 清空
+curl -X POST "http://127.0.0.1:8080/api/v1/admin/changes/clear"
+```
+
+按条删除用的是和巡检相同的 key 规则（`%020d-域名`），所以 `domain`
+同样会做 canonical 归一化。
+
+### 监控
+
+```bash
+# 批量加/移，单次最多 500 个；自动归一化与去重
+curl -X POST "http://127.0.0.1:8080/api/v1/admin/watch/bulk" \
+  -H 'Content-Type: application/json' \
+  -d '{"domains":["example.com","https://www.example.org/x"],"action":"add"}'
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "action": "add", "added": 2, "failed": 1, "duplicated": 1,
+    "ok": ["example.com", "example.org"], "invalid": ["bad domain!"]
+  }
+}
+```
+
+批量加入的域名会走与单个加入相同的路径——**先抓一次建立基线**，
+否则第一轮巡检会把「全部字段」当成一次变更推出去。
+
+```bash
+# 清空监控列表（不删缓存和历史）
+curl -X POST "http://127.0.0.1:8080/api/v1/admin/watch/purge"
+```
+
+### 备份文件
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/admin/backups"
+curl -X DELETE "http://127.0.0.1:8080/api/v1/admin/backups"   # 只删 .db
+```
+
+清空只删 `backups/` 下的 `.db` 文件，同目录里你自己放的东西不会被误伤。
+
+---
+
 ## GET /api/v1/stats
 
 ```json

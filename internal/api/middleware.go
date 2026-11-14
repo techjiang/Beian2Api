@@ -253,7 +253,7 @@ func (s *Server) validKey(key string) bool {
 
 func isPublicPath(p string) bool {
 	switch p {
-	case "/", "/healthz", "/readyz", "/api/v1/openapi.json", "/docs", "/favicon.ico", "/logo.svg", "/apple-touch-icon.png":
+	case "/", "/healthz", "/readyz", "/api/v1/openapi.json", "/docs", "/admin", "/favicon.ico", "/logo.svg", "/apple-touch-icon.png":
 		return true
 	}
 	return strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/badge/") || strings.HasPrefix(p, "/docs/")

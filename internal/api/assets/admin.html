@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>后台管理 — Beian2API</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#4f46e5">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/style.css?v=__ASSET_VERSION__">
+<link rel="stylesheet" href="/assets/admin.css?v=__ASSET_VERSION__">
+</head>
+<body class="admin">
+<div class="wrap">
+  <header class="top">
+    <img src="/logo.svg" alt="Beian2API">
+    <div class="brand">Beian2API<small>后台管理</small></div>
+    <nav>
+      <a href="/">查询台</a>
+      <a href="/docs">文档</a>
+      <a href="/api/v1/openapi.json">OpenAPI</a>
+    </nav>
+  </header>
+
+  <!-- Key 框：后台接口全部过 withAuth，开了鉴权的部署必须先填 Key。
+       这里不隐藏、不用弹窗，就摆在最上面——它决定下面所有面板能不能用，
+       藏起来只会让人对着满屏「加载失败」猜原因。 -->
+  <div class="card key-bar" id="keybar" hidden>
+    <form id="kform" autocomplete="off">
+      <label class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+        <input id="k" type="password" placeholder="这个实例开启了鉴权，填入 API Key" spellcheck="false">
+      </label>
+      <button type="submit" class="ghost">保存并验证</button>
+    </form>
+    <div class="hint small-hint" id="keytip">Key 只存在这个浏览器里。后台的所有写操作都要它。</div>
+  </div>
+
+  <div class="admin-shell">
+    <!-- 侧栏：后台有六块互不相关的东西，做成 tab 会比一条长页面更好找。 -->
+    <aside class="side" id="side">
+      <a class="on" data-p="overview" href="#overview">概览</a>
+      <a data-p="cache" href="#cache">缓存</a>
+      <a data-p="history" href="#history">历史快照</a>
+      <a data-p="changes" href="#changes">变更流水</a>
+      <a data-p="watch" href="#watch">监控</a>
+      <a data-p="backups" href="#backups">备份</a>
+    </aside>
+
+    <main class="main">
+      <!-- 概览 -->
+      <section class="page on" id="p-overview">
+        <div class="page-head">
+          <h2>概览</h2>
+          <div class="page-acts">
+            <button class="ghost small" id="ov-refresh" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="grid tiles" id="ov-tiles">
+          <div class="card tile"><div class="k">已缓存域名</div><div class="v" id="ov-cache">–</div><div class="s">重复查询毫秒级</div></div>
+          <div class="card tile"><div class="k">历史快照</div><div class="v" id="ov-history">–</div><div class="s" id="ov-hitrate">命中率 –</div></div>
+          <div class="card tile"><div class="k">变更流水</div><div class="v" id="ov-changes">–</div><div class="s" id="ov-stale">回退 –</div></div>
+          <div class="card tile"><div class="k">监控域名</div><div class="v" id="ov-watch">–</div><div class="s" id="ov-rhythm">巡检 –</div></div>
+          <div class="card tile"><div class="k">数据文件</div><div class="v" id="ov-size">–</div><div class="s" id="ov-uptime">运行 –</div></div>
+        </div>
+
+        <div class="card panel">
+          <div class="panel-head"><div class="panel-title"><span>上游数据源</span><span class="pill" id="ov-prov-count">–</span></div></div>
+          <div id="ov-providers"><div class="hint small-hint">读取中…</div></div>
+        </div>
+
+        <div class="card panel">
+          <div class="panel-head"><div class="panel-title"><span>推送通道</span><span class="pill" id="ov-n-count">–</span></div></div>
+          <div id="ov-notify"><div class="hint small-hint">读取中…</div></div>
+        </div>
+
+        <div class="card panel">
+          <div class="panel-head"><div class="panel-title"><span>存储与保留策略</span></div></div>
+          <div id="ov-storage"></div>
+        </div>
+      </section>
+
+      <!-- 缓存 -->
+      <section class="page" id="p-cache">
+        <div class="page-head">
+          <h2>缓存</h2>
+          <div class="page-acts">
+            <label class="sel"><input id="c-q" type="search" placeholder="域名 / 备案号 / 主办单位" spellcheck="false"></label>
+            <button class="ghost small" id="c-search" type="button">搜索</button>
+            <button class="ghost small danger" id="c-clear-expired" type="button">清理过期</button>
+            <button class="ghost small danger" id="c-clear-all" type="button">全部清空</button>
+          </div>
+        </div>
+        <div class="card panel">
+          <div id="c-list"><div class="hint small-hint">读取中…</div></div>
+          <button class="more" id="c-more" type="button" hidden>加载更多</button>
+        </div>
+      </section>
+
+      <!-- 历史快照 -->
+      <section class="page" id="p-history">
+        <div class="page-head">
+          <h2>历史快照</h2>
+          <div class="page-acts">
+            <label class="sel"><input id="h-q" type="search" placeholder="域名 / 备案号" spellcheck="false"></label>
+            <button class="ghost small" id="h-search" type="button">搜索</button>
+          </div>
+        </div>
+        <div class="card panel">
+          <div id="h-list"><div class="hint small-hint">读取中…</div></div>
+          <button class="more" id="h-more" type="button" hidden>加载更多</button>
+        </div>
+      </section>
+
+      <!-- 变更流水 -->
+      <section class="page" id="p-changes">
+        <div class="page-head">
+          <h2>变更流水</h2>
+          <div class="page-acts">
+            <label class="sel">
+              <select id="ch-kind" title="只看某一类事件">
+                <option value="">全部类型</option>
+                <option value="changed">变更</option>
+                <option value="revoked">注销</option>
+                <option value="registered">新增</option>
+                <option value="upstream_error">上游异常</option>
+                <option value="recovered">已恢复</option>
+              </select>
+            </label>
+            <button class="ghost small" id="ch-refresh" type="button">刷新</button>
+            <button class="ghost small danger" id="ch-clear" type="button">清空流水</button>
+          </div>
+        </div>
+        <div class="card panel">
+          <div id="ch-list"><div class="hint small-hint">读取中…</div></div>
+          <button class="more" id="ch-more" type="button" hidden>加载更多</button>
+        </div>
+      </section>
+
+      <!-- 监控 -->
+      <section class="page" id="p-watch">
+        <div class="page-head">
+          <h2>监控</h2>
+          <div class="page-acts">
+            <button class="ghost small" id="w-run" type="button">立即巡检</button>
+            <button class="ghost small danger" id="w-purge" type="button">清空监控</button>
+          </div>
+        </div>
+        <div class="card panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <span>批量导入</span>
+              <span class="pill" id="w-total">–</span>
+            </div>
+          </div>
+          <!-- 批量导入不是「贴一堆域名」那么简单：真实用法是从别处拷一份清单，
+               里面混着 URL、www 前缀、重复项、空行。所以这里说清楚「会归一化、
+               会去重」，并且把失败的那几个原样列出来——不然用户不知道该改哪一行。 -->
+          <textarea id="w-bulk" class="bulk" rows="4" spellcheck="false"
+            placeholder="每行一个域名，也可以用逗号或空格分隔。会统一归一化（去协议、去 www、去重）。"></textarea>
+          <div class="bulk-acts">
+            <button class="ghost small" id="w-add" type="button">加入监控</button>
+            <button class="ghost small" id="w-remove" type="button">移出监控</button>
+            <span class="small-hint" id="w-bulk-tip"></span>
+          </div>
+          <div id="w-list"><div class="hint small-hint">读取中…</div></div>
+          <button class="more" id="w-more" type="button" hidden>加载更多</button>
+        </div>
+      </section>
+
+      <!-- 备份 -->
+      <section class="page" id="p-backups">
+        <div class="page-head">
+          <h2>备份</h2>
+          <div class="page-acts">
+            <button class="ghost small" id="b-make" type="button">立即备份</button>
+            <button class="ghost small danger" id="b-purge" type="button">清空备份</button>
+          </div>
+        </div>
+        <div class="card panel">
+          <div class="panel-head">
+            <div class="panel-title"><span>快照文件</span><span class="pill" id="b-total">–</span></div>
+            <div class="panel-acts"><span class="pill" id="b-size">–</span></div>
+          </div>
+          <div id="b-list"><div class="hint small-hint">读取中…</div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="foot">
+    <span>Beian2API · 后台</span>
+    <span id="f-note">破坏性操作会直接改数据文件，请确认后再点</span>
+    <span class="sp"><a href="/">← 回到查询台</a></span>
+  </footer>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script src="/assets/admin.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

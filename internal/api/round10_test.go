@@ -220,6 +220,9 @@ func apiRoutes(t *testing.T, h http.Handler) []string {
 		"/api/v1/watch/run", "/api/v1/changes", "/api/v1/changes.rss",
 		"/api/v1/notify/status", "/api/v1/notify/test", "/api/v1/stats",
 		"/api/v1/providers", "/api/v1/admin/backup",
+		"/api/v1/admin/overview", "/api/v1/admin/cache", "/api/v1/admin/cache/clear",
+		"/api/v1/admin/history", "/api/v1/admin/changes", "/api/v1/admin/changes/clear",
+		"/api/v1/admin/watch/bulk", "/api/v1/admin/watch/purge", "/api/v1/admin/backups",
 		"/badge/icp.svg", "/badge/icp", "/healthz", "/readyz",
 	}
 	var out []string

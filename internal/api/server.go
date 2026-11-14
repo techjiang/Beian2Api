@@ -98,6 +98,27 @@ func (s *Server) Handler() http.Handler {
 		allowMethods(s.handleAdminBackup, http.MethodGet, http.MethodPost))))
 	mux.HandleFunc("/api/v1/openapi.json", allowMethods(s.handleOpenAPI, http.MethodGet))
 
+	// 后台管理。方法与常规读接口一样显式声明，破坏性操作额外过 withAdmin：
+	// 配了 Key 就必须带 Key，没配 Key 时只接受真正的本机直连。
+	//
+	// 这一层不能用 read/readWrite 包装：它们只做 withAuth，而 withAuth 在
+	// 未配置 Key 时是**直接放行**的。后台能删缓存、删历史、清流水，
+	// 一个公开可调的管理接口等于把「数据」交给全网。
+	admin := func(methods ...string) func(http.HandlerFunc) http.HandlerFunc {
+		return func(h http.HandlerFunc) http.HandlerFunc {
+			return s.withRateLimit(s.withAuth(s.withAdmin(allowMethods(h, methods...))))
+		}
+	}
+	mux.HandleFunc("/api/v1/admin/overview", admin(http.MethodGet)(s.handleAdminOverview))
+	mux.HandleFunc("/api/v1/admin/cache", admin(http.MethodGet, http.MethodDelete)(s.handleAdminCache))
+	mux.HandleFunc("/api/v1/admin/cache/clear", admin(http.MethodPost)(s.handleAdminCacheClear))
+	mux.HandleFunc("/api/v1/admin/history", admin(http.MethodGet, http.MethodDelete)(s.handleAdminHistory))
+	mux.HandleFunc("/api/v1/admin/changes/clear", admin(http.MethodPost)(s.handleAdminChangesClear))
+	mux.HandleFunc("/api/v1/admin/changes", admin(http.MethodDelete)(s.handleAdminChangeDelete))
+	mux.HandleFunc("/api/v1/admin/watch/bulk", admin(http.MethodPost)(s.handleAdminWatchBulk))
+	mux.HandleFunc("/api/v1/admin/watch/purge", admin(http.MethodPost)(s.handleAdminWatchPurge))
+	mux.HandleFunc("/api/v1/admin/backups", admin(http.MethodGet, http.MethodDelete)(s.handleAdminBackups))
+
 	// 徽章与运维。
 	//
 	// 徽章必须公开（README 里的 <img> 带不了请求头），但正因为公开，
