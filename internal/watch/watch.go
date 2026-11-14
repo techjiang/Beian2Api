@@ -167,7 +167,17 @@ func (w *Watcher) RunOnce(ctx context.Context) []Change {
 	}()
 
 	items, err := w.st.ListWatch()
-	if err != nil || len(items) == 0 {
+	if err != nil {
+		return nil
+	}
+	if len(items) == 0 {
+		// 一个域名都没监控时也要记下「这一轮跑过了」。
+		//
+		// 之前这里直接 return，recordRun 不执行，于是 meta 里的 last_run_at
+		// 永远是 0——首页那块标签一直写「待首轮」，而调度器明明按节奏在跑。
+		// 一个刚部署、还没加任何域名的实例，看到的就是「巡检好像没启动」，
+		// 而它其实一切正常，只是在等下一个周期。
+		w.recordRun(0)
 		return nil
 	}
 	jobs := make(chan store.WatchItem)

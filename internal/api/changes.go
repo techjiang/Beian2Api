@@ -128,6 +128,12 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 // 不校验的话，一个上兆字节的参数就能让服务端白白 memcmp 一遍；
 // 而控制字符会破坏 key 的字典序前提——虽然结果只是「翻不到东西」，
 // 但那种静默错乱比明确报错难查得多。
+//
+// 形状也必须校验，理由更硬：**垃圾游标会静默翻回第一页**。
+// 乱码在字典序上排在所有 key 之后，扫到末尾再 Prev 一步，落点正是
+// 最新那一条——于是 `?cursor=abc` 和「不带 cursor」返回一模一样的内容，
+// 调用方拿着一个已经损坏的游标继续翻，会以为自己在往后走，其实原地绕圈。
+// 而游标格式化错了根本不是「资源被裁掉了」那种正常情况，没有理由装作没事。
 func validCursor(c string) error {
 	if len(c) > 300 {
 		return fmt.Errorf("cursor 过长（%d 字节），上限 300", len(c))
@@ -135,6 +141,16 @@ func validCursor(c string) error {
 	for i := 0; i < len(c); i++ {
 		if c[i] < 0x20 || c[i] == 0x7f {
 			return fmt.Errorf("cursor 含非法字符")
+		}
+	}
+	// 形状：20 位十进制时间戳 + "-" + 域名。这是我们自己发出去的格式，
+	// 与 store 里变更 key 的构造必须一致。
+	if len(c) < 22 || c[20] != '-' {
+		return fmt.Errorf("cursor 格式不对，应原样使用上一页返回的 next_cursor")
+	}
+	for i := 0; i < 20; i++ {
+		if c[i] < '0' || c[i] > '9' {
+			return fmt.Errorf("cursor 格式不对，应原样使用上一页返回的 next_cursor")
 		}
 	}
 	return nil

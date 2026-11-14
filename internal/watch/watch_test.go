@@ -668,3 +668,33 @@ func TestRecoveredWhenBaselineBuiltAfterAlert(t *testing.T) {
 		t.Fatal("恢复事件应带上恢复后的备案号")
 	}
 }
+
+// 一个域名都没监控时，一轮巡检也要留下「跑过了」的痕迹。
+//
+// 之前 RunOnce 在 len(items)==0 时直接 return，recordRun 不执行：meta 里的
+// last_run_at 永远是 0，首页那块标签一直写「待首轮」——调度器明明按节奏在跑，
+// 界面上看起来却像没启动过。刚部署、还没加域名的实例都会撞上这一幕。
+func TestRunOnceRecordsRunWithoutWatches(t *testing.T) {
+	w, st, _ := setup(t)
+
+	if n, _ := st.CountWatch(); n != 0 {
+		t.Fatalf("准备阶段不该有监控项，实际 %d", n)
+	}
+	if got := st.Stat(metaLastRun); got != 0 {
+		t.Fatalf("准备阶段 last_run_at 应为 0，实际 %d", got)
+	}
+
+	before := model.Now()
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("没有监控项时不该产生事件: %+v", ch)
+	}
+	after := model.Now()
+
+	got := st.Stat(metaLastRun)
+	if got < before || got > after {
+		t.Fatalf("空巡检也必须记下这一轮的时间（%d 不在 [%d,%d] 内）", got, before, after)
+	}
+	if w.Status(true).LastRunAt == 0 {
+		t.Fatal("Status 应反映出「跑过一轮」")
+	}
+}

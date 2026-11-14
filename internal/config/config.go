@@ -184,7 +184,15 @@ func (c *Config) applyEnv() {
 		c.Auth.Keys = splitList(v)
 	}
 	if v := os.Getenv("BEIAN2API_PROVIDERS"); v != "" {
-		c.Providers = parseProviders(v)
+		// 保留 yaml 里同名源的细节（timeout / id / key），只让环境变量决定
+		// 「启用哪些、权重多少」。
+		//
+		// 之前这里是直接整个替换：`config.yaml` 里配好 apihz 的自有凭据、
+		// 或者把某个源的超时从默认 8 秒调成 3 秒，只要环境里有
+		// `BEIAN2API_PROVIDERS=miit:1,apihz:0.4`（README 就是让人这么写的），
+		// 这些细节会被**静默抹掉**——凭据退回公共测试凭据、超时退回 8 秒，
+		// 而 `beian2api config` 看起来一切正常，只是 id/key 变成了空。
+		c.Providers = mergeProviders(c.Providers, parseProviders(v))
 	}
 	// 凭据单独给环境变量：一行 BEIAN2API_PROVIDERS 里塞不下，
 	// 而且凭据不该和「要不要启用某个源」混在一起。
@@ -270,6 +278,29 @@ func parseProviders(v string) []Provider {
 			}
 		}
 		out = append(out, Provider{Name: name, Enabled: w > 0, Weight: w, Timeout: 8})
+	}
+	return out
+}
+
+// mergeProviders 用环境变量给出的清单决定「启用哪些源、权重多少」，
+// 但每个源的其它细节（timeout、id、key）沿用配置文件里的值。
+//
+// 为什么不是「环境变量整份覆盖」：一行 `miit:1,apihz:0.4` 只写得出名字和
+// 权重，写不出凭据和超时。整份覆盖的结果是「为了调一下权重，把凭据顺手
+// 丢了」——而凭据丢了不报错，只是退回公共测试凭据、被限流时表现为
+// 「偶尔查不到」，从任何地方都看不出原因。
+func mergeProviders(base, override []Provider) []Provider {
+	byName := make(map[string]Provider, len(base))
+	for _, p := range base {
+		byName[strings.ToLower(p.Name)] = p
+	}
+	out := make([]Provider, 0, len(override))
+	for _, p := range override {
+		if old, ok := byName[strings.ToLower(p.Name)]; ok {
+			p.Timeout = old.Timeout
+			p.ID, p.Key = old.ID, old.Key
+		}
+		out = append(out, p)
 	}
 	return out
 }
@@ -371,11 +402,15 @@ func (c *Config) Validate() error {
 			ch.Events[j] = e
 		}
 	}
+	// 三个上限都是「0 表示不裁剪」。
+	//
+	// retain_history_total 这里原来有一条 `if 0 { 赋值 20000 }`：它的本意是
+	// 「没配就用默认值」，但 yaml / 环境变量解析完已经分不清「没配」和
+	// 「显式写了 0」了——默认值在 Default() 里就填好了，走到这儿还是 0
+	// 只可能是因为有人明确写了 0（不裁剪）。把它改写回 20000，等于让
+	// 「不裁剪」这个合法取值永远配不出来，而配置文件上一个字都没错。
 	if c.Storage.RetainChanges < 0 || c.Storage.RetainHistory < 0 || c.Storage.RetainHistoryTotal < 0 {
 		return fmt.Errorf("storage.retain_changes / retain_history / retain_history_total 不能为负数")
-	}
-	if c.Storage.RetainHistoryTotal == 0 {
-		c.Storage.RetainHistoryTotal = 20000
 	}
 	if c.Storage.RetainHistory > 0 && c.Storage.RetainHistoryTotal > 0 &&
 		c.Storage.RetainHistoryTotal < c.Storage.RetainHistory {

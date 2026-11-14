@@ -1,6 +1,49 @@
-# 更新日志
-
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+
+## [1.14.0] - 2026-11-15
+
+这轮的六个问题有一半是「配置看着对、接口回 200、界面显示正常，只是做的事
+和说的事不一样」。共同点是**报错是沉默的**——它们不会崩，只会让你以为已经好了。
+
+### 修复
+
+- **`BEIAN2API_PROVIDERS` 会把配置文件里的凭据和超时静默抹掉**。README 教人
+  用 `BEIAN2API_PROVIDERS=miit:1,apihz:.4` 配数据源，而实现是「整份替换」：
+  `config.yaml` 里 apihz 的自有凭据退回公共测试凭据、调过的 timeout 退回 8 秒，
+  而 `beian2api config` 输出看起来一切正常，只是 `id`/`key` 变成了空。公共凭据
+  被限流时只表现为「偶尔查不到」，从任何地方都看不出原因。环境变量现在只决定
+  「启用哪些源、权重多少」，其它细节沿用配置文件（`mergeProviders`）。
+- **`storage.retain_history_total: 0`（不裁剪）被改写成 20000**。默认值在加载时
+  就填好了，走到校验那一步还是 0 只可能是有人明确写了 0；把它改写回去，等于让
+  「不裁剪」这个合法取值永远配不出来，而配置上一个字都没错。历史用着用着就被
+  悄悄裁到 2 万条。三个上限现在语义一致：0 = 不裁剪。
+- **推送通道全部停用时，界面说「还没有配置推送通道」**。`notify/status` 之前对
+  「一个都没配」和「配了但全被 disabled」回同一个 `enabled:false` + 空列表。
+  config.yaml 里明明写着三个通道的人，只会照着那句提示再去加第四个，加完还是
+  不生效——真正的原因是他自己关掉的。响应新增 `configured` / `disabled`，
+  `notify/test` 的 503 文案也点明是「写了 N 个但全部停用」。
+- **垃圾翻页游标会静默翻回第一页**。乱码在字典序上排在所有 key 之后，
+  Seek 到末尾再 Prev 一步落到最新那条，于是 `?cursor=abc` 和不带 cursor 返回
+  一模一样的内容，调用方拿着坏游标继续翻会以为在往后走，其实原地绕圈。
+  现在校验形状（20 位时间戳 + `-` + 域名），不合规直接 400 `invalid_cursor`。
+- **徽章在上游故障时会把「error」缓存十分钟**。缓存头原来不分成败，
+  而缓存的不只是本地浏览器，还有别人 CDN——上游早恢复了，所有嵌着徽章的
+  README 还在红色报错，清都清不掉。失败态改为 `Cache-Control: no-store`。
+- **`?refresh=abc` 被静默当成 false**。调用方以为在强制回源，实际拿到缓存里
+  那份旧数据；同批接口的 `limit=abc`、`since=abc` 都回 400，这个没道理例外。
+  新增严格解析（`1/0`、`true/false`、`yes/no`、`y/n`、`on/off`），其余 400
+  `invalid_refresh`。
+- **一个域名都没监控时，巡检跑过也不留痕迹**。`RunOnce` 在监控列表为空时
+  直接 return，`last_run_at` 永远是 0——刚部署还没加域名的实例，首页一直写
+  「待首轮」，看起来像调度器没启动。空巡检现在也记这一轮的时间。
+
+### 变更
+
+- `GET /api/v1/notify/status` 新增 `configured` 与 `disabled` 字段（仅无可用通道时出现）。
+- `GET|POST /api/v1/query`、`GET|POST /api/v1/batch` 的 `refresh` 非法取值返回 400。
+- `GET /api/v1/changes` 的 `cursor` 追加格式校验，返回 400 `invalid_cursor`。
+
+1.0/)。
 
 ## [1.13.0] - 2026-11-14
 

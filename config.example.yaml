@@ -55,6 +55,7 @@ storage:
   retain_history: 200       # 每个域名保留多少条历史快照（按域名分别算）
   # 历史快照的全局上限（跨所有域名）。只有按域名的配额挡不住「刷一批随机域名各查一次」，
   # 每个域名都没超限，合起来却能无限长。不能小于 retain_history。
+  # 三个上限都是 0 表示不裁剪。
   retain_history_total: 20000
 
 providers:

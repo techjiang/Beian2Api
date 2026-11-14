@@ -805,10 +805,21 @@ function withKey(path) {
   function loadNotify() {
     if (!nList) return;
     api('/api/v1/notify/status').then(function (d) {
-      $('#n-total').textContent = d.total ? d.total + ' 个' : '未配置';
+      $('#n-total').textContent = d.total ? d.total + ' 个' : (d.configured ? d.configured + ' 个（全部停用）' : '未配置');
       nList.innerHTML = '';
       if (!d.enabled) {
-        nList.appendChild(el('div', 'hint small-hint', '还没有配置推送通道。在 config.yaml 里加 notify.channels，或设 BEIAN2API_WEBHOOK。'));
+        /* 「一个都没配」和「配了但全被关掉」是两件事。
+           之前两种情况都说「还没有配置推送通道」，于是配了三个
+           disabled: true 的人会照着提示再加第四个，加完还是不生效——
+           真正的原因是他自己关掉的，而界面上一个字都没提。 */
+        if (d.configured) {
+          nList.appendChild(el('div', 'hint small-hint',
+            '配置里有 ' + d.configured + ' 个推送通道，但全部停用中：' +
+            (d.disabled && d.disabled.length ? d.disabled.join('、') : '') +
+            '。把 config.yaml 里对应通道的 disabled 去掉（或补上 url）后重启即可。'));
+        } else {
+          nList.appendChild(el('div', 'hint small-hint', '还没有配置推送通道。在 config.yaml 里加 notify.channels，或设 BEIAN2API_WEBHOOK。'));
+        }
         return;
       }
       var box = el('div', 'row-list');

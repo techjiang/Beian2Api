@@ -43,7 +43,18 @@ func (s *Server) handleBadge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=600")
+	// 失败态不进缓存。
+	//
+	// 之前无论结果如何都回 `public, max-age=600`：上游抖一下，徽章变成
+	// 「ICP: error」，然后这个红图被浏览器和 CDN 钉死 10 分钟——上游早就
+	// 恢复了，所有嵌着它的 README 还在红色报错，而且清不掉（不是你自己的
+	// 浏览器缓存，是别人 CDN 上的）。徽章是给别人看的第一眼，
+	// 它必须比后端更早知道「现在已经好了」。
+	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=600")
+	}
 	if res != nil && res.Cached {
 		w.Header().Set("X-Cache", "HIT")
 	}

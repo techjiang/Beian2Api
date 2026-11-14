@@ -279,7 +279,7 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_LISTEN` | `:8080` | 监听地址 |
 | `BEIAN2API_DATA_DIR` | `./data` | 数据目录 |
 | `BEIAN2API_API_KEYS` | 空 | 启用鉴权的 Key，逗号分隔 |
-| `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重（权重高的先起跑，0 即禁用） |
+| `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重（权重高的先起跑，0 即禁用）。只决定「启用哪些、权重多少」，**不动配置文件里各源的 `timeout` / `id` / `key`** |
 | `BEIAN2API_TTL` | `21600` | 缓存秒数 |
 | `BEIAN2API_WEBHOOK` | 空 | 变更推送地址（单通道，等价于一个 generic 通道） |
 | `BEIAN2API_NOTIFY_CHANNELS` | 空 | 多通道推送，形如 `dingtalk:<url>,wecom:<url>` |

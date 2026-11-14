@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/asoe/beian2api/internal/notify"
@@ -15,7 +17,29 @@ import (
 func (s *Server) handleNotifyStatus(w http.ResponseWriter, r *http.Request) {
 	d := s.notifier
 	if d == nil || !d.Enabled() {
-		writeOK(w, map[string]any{"enabled": false, "total": 0, "channels": []any{}})
+		// 「一个通道都没配」和「配了但全被关掉」是两件不同的事。
+		//
+		// 之前两种情况都回 enabled:false + 空列表，页面上写着「还没有配置推送
+		// 通道」——而 config.yaml 里明明有三个通道，只是都写了 disabled: true
+		// （或者名字/地址改到一半）。用户会照着那句提示反复去加通道，
+		// 加完还是不生效，因为真正的原因是他自己关掉的。
+		//
+		// configured 是「配置文件里写了几个」，disabled 是其中被停用的那些。
+		configured := len(s.cfg.Channels())
+		off := make([]string, 0, configured)
+		for _, ch := range s.cfg.Channels() {
+			if strings.TrimSpace(ch.URL) == "" || ch.Disabled {
+				name := ch.Name
+				if name == "" {
+					name = ch.URL
+				}
+				off = append(off, name)
+			}
+		}
+		writeOK(w, map[string]any{
+			"enabled": false, "total": 0, "channels": []any{},
+			"configured": configured, "disabled": off,
+		})
 		return
 	}
 	states := d.States()
@@ -53,7 +77,13 @@ func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	}
 	d := s.notifier
 	if d == nil || !d.Enabled() {
-		writeErr(w, http.StatusServiceUnavailable, "notify_disabled", "未配置任何推送通道")
+		// 同上：说清楚是「没配」还是「全停了」。一句「未配置任何推送通道」
+		// 会让配了三个 disabled 通道的人去加第四个。
+		msg := "未配置任何推送通道"
+		if n := len(s.cfg.Channels()); n > 0 {
+			msg = fmt.Sprintf("配置里写了 %d 个推送通道，但全部处于停用状态（disabled: true 或 url 为空）", n)
+		}
+		writeErr(w, http.StatusServiceUnavailable, "notify_disabled", msg)
 		return
 	}
 	// 测试消息要同步返回结果，但别让一个卡死的通道拖住请求：

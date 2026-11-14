@@ -28,7 +28,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	var refresh bool
 	if r.Method == http.MethodGet {
 		domain = r.URL.Query().Get("domain")
-		refresh = truthy(r.URL.Query().Get("refresh"))
+		var rerr error
+		if refresh, rerr = parseBoolParam(r.URL.Query().Get("refresh")); rerr != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_refresh", rerr.Error())
+			return
+		}
 	} else {
 		var body struct {
 			Domain  string `json:"domain"`
@@ -58,7 +62,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	var refresh bool
 	if r.Method == http.MethodGet {
 		domains = strings.Split(r.URL.Query().Get("domains"), ",")
-		refresh = truthy(r.URL.Query().Get("refresh"))
+		var rerr error
+		if refresh, rerr = parseBoolParam(r.URL.Query().Get("refresh")); rerr != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_refresh", rerr.Error())
+			return
+		}
 	} else if r.Method == http.MethodPost {
 		var body struct {
 			Domains []string `json:"domains"`
@@ -533,12 +541,23 @@ func parseLimit(raw string, def, max int) (int, error) {
 	return n, nil
 }
 
-func truthy(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+// parseBoolParam 解析布尔型 query 参数。
+//
+// 空串表示「没传」，取 false。除此之外只接受明确的真/假写法，
+// 其余一律报错——`refresh=abc` 静默当成 false，调用方以为自己在强制回源，
+// 实际拿到的是缓存里那份旧数据，而且没有任何迹象说明它没生效。
+// 同一批接口里 `limit=abc`、`since=abc` 都会返回 400，
+// 「刷新开关写错了」没有理由是唯一的例外。
+func parseBoolParam(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return false, nil
 	case "1", "true", "yes", "y", "on":
-		return true
+		return true, nil
+	case "0", "false", "no", "n", "off":
+		return false, nil
 	}
-	return false
+	return false, fmt.Errorf("取值只能是 1/0、true/false、yes/no、on/off，收到 %q", raw)
 }
 
 // batchWindow 估算批量查询需要多久：按并发度换算轮数，再乘单域名超时并留余量。
