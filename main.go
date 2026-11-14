@@ -120,7 +120,9 @@ func bootstrap(configPath string) (*config.Config, *store.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	st.WithRetention(cfg.Storage.RetainChanges, cfg.Storage.RetainHistory)
+	st.WithRetention(cfg.Storage.RetainChanges, cfg.Storage.RetainHistory).
+		WithHistoryTotal(cfg.Storage.RetainHistoryTotal).
+		WithStaleWindow(cfg.Cache.StaleMax)
 	return cfg, st, nil
 }
 
@@ -132,7 +134,12 @@ func buildTasks(cfg *config.Config) ([]provider.Task, error) {
 			continue
 		}
 		timeout := time.Duration(p.Timeout) * time.Second
-		inst, err := reg.Build(p.Name, provider.Options{Timeout: timeout, HTTP: provider.NewHTTPClient(timeout)})
+		inst, err := reg.Build(p.Name, provider.Options{
+			Timeout: timeout,
+			HTTP:    provider.NewHTTPClient(timeout),
+			ID:      p.ID,
+			Key:     p.Key,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -199,6 +206,13 @@ func cmdServe(args []string) error {
 	}
 	defer st.Close()
 
+	// 按配置整理一次历史和缓存。放在这里而不是 store.Open：
+	// 打开文件时配置还没加载，只能拿默认上限去裁，等于把
+	// 「retain_history: 0（不裁剪）」的部署每次重启都砍回 200 条。
+	if err := st.Prepare(); err != nil {
+		return err
+	}
+
 	log := logger(cfg.LogLevel)
 	tasks, err := buildTasks(cfg)
 	if err != nil {
@@ -237,8 +251,13 @@ func cmdServe(args []string) error {
 			case <-t.C:
 				if r, err := st.Maintain(); err != nil {
 					log.Warn("存储维护失败", "err", err)
-				} else if r.ChangesTrimmed > 0 {
-					log.Info("变更流水裁剪完成", "changes", r.ChangesTrimmed)
+				} else {
+					if r.ChangesTrimmed > 0 {
+						log.Info("变更流水裁剪完成", "changes", r.ChangesTrimmed)
+					}
+					if r.CachePurged > 0 {
+						log.Info("过期缓存清理完成", "purged", r.CachePurged)
+					}
 				}
 			}
 		}

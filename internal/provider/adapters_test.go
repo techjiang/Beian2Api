@@ -290,3 +290,34 @@ func TestNormalizeDomainEdgeCases(t *testing.T) {
 		t.Fatalf("域名归一化失败: %q", r.Domain)
 	}
 }
+
+// 凭据必须真的带进请求：配置里写了自己的 id/key，请求里却还是公共值，
+// 等于「配了也没用」，而错误只在被限流时才暴露。
+func TestAPIHZCredentialFromOptions(t *testing.T) {
+	var gotID, gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = r.URL.Query().Get("id")
+		gotKey = r.URL.Query().Get("key")
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 400, "msg": "无数据"})
+	}))
+	defer srv.Close()
+
+	reg := NewRegistry()
+	inst, err := reg.Build("apihz", Options{HTTP: mockClient(), ID: "myid", Key: "mykey"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.(*APIHZ).URL = srv.URL
+	_, _ = inst.Lookup(context.Background(), "example.com")
+	if gotID != "myid" || gotKey != "mykey" {
+		t.Fatalf("请求里的凭据不对: id=%q key=%q", gotID, gotKey)
+	}
+}
+
+// 不填凭据时保持原来的公共测试值，老部署行为不变。
+func TestAPIHZDefaultCredentialUnchanged(t *testing.T) {
+	p := NewAPIHZ(Options{HTTP: mockClient()})
+	if p.ID != "88888888" || p.Key != "88888888" {
+		t.Fatalf("默认凭据不该变: %q %q", p.ID, p.Key)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,18 +57,11 @@ func cmdBackup(args []string) error {
 	return nil
 }
 
-// dumpItem 是导出文件的单条记录。
-type dumpItem struct {
-	Domain    string `json:"domain"`
-	Found     bool   `json:"found"`
-	ICPCode   string `json:"icp_code,omitempty"`
-	UnitName  string `json:"unit_name,omitempty"`
-	Records   any    `json:"records"`
-	Source    string `json:"source"`
-	FetchedAt int64  `json:"fetched_at"`
-}
-
-// cmdExport 导出全部缓存为 JSON，用于跨机迁移或版本升级。
+// cmdExport 导出全部数据为 JSON，用于跨机器迁移或版本升级。
+//
+// 以前只导缓存，于是 README 里那句「跨机器迁移用 JSON」有一半是假的：
+// 迁完监控列表、历史快照、变更流水、推送状态全没了。现在导的是完整快照，
+// 并且在一个读事务里取，导出来的是某一时刻的一致状态。
 func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "配置文件路径")
@@ -82,20 +76,11 @@ func cmdExport(args []string) error {
 	}
 	defer st.Close()
 
-	type wrapper struct {
-		Version    string         `json:"version"`
-		ExportedAt int64          `json:"exported_at"`
-		Total      int            `json:"total"`
-		Items      []*store.Entry `json:"items"`
-	}
-	w := wrapper{Version: version, ExportedAt: time.Now().Unix()}
-	if err := st.AllCache(func(e *store.Entry) error {
-		w.Items = append(w.Items, e)
-		return nil
-	}); err != nil {
+	d, err := st.Dump()
+	if err != nil {
 		return err
 	}
-	w.Total = len(w.Items)
+	d.ExportedAt = time.Now().Unix()
 	f, err := os.Create(*out)
 	if err != nil {
 		return err
@@ -103,14 +88,16 @@ func cmdExport(args []string) error {
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(w); err != nil {
+	if err := enc.Encode(d); err != nil {
 		return err
 	}
-	fmt.Printf("✔ 已导出 %d 条到 %s\n", w.Total, *out)
+	fmt.Printf("✔ 已导出到 %s\n", *out)
+	fmt.Printf("  缓存 %d 条 · 历史 %d 条 · 监控 %d 个 · 变更 %d 条 · 推送通道 %d 个\n",
+		len(d.Cache), len(d.History), len(d.Watch), len(d.Changes), len(d.Notify))
 	return nil
 }
 
-// cmdImport 从 JSON 恢复缓存。
+// cmdImport 从 JSON 恢复全部数据。
 func cmdImport(args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "配置文件路径")
@@ -130,17 +117,45 @@ func cmdImport(args []string) error {
 		return err
 	}
 	defer f.Close()
-	var w struct {
-		Items []*store.Entry `json:"items"`
-	}
-	if err := json.NewDecoder(f).Decode(&w); err != nil {
+	d, err := decodeDump(f)
+	if err != nil {
 		return err
 	}
-	if err := st.Bulk(w.Items); err != nil {
+	if err := st.Restore(d); err != nil {
 		return err
 	}
-	fmt.Printf("✔ 已导入 %d 条\n", len(w.Items))
+	fmt.Printf("✔ 已导入\n")
+	fmt.Printf("  缓存 %d 条 · 历史 %d 条 · 监控 %d 个 · 变更 %d 条 · 推送通道 %d 个\n",
+		len(d.Cache), len(d.History), len(d.Watch), len(d.Changes), len(d.Notify))
 	return nil
+}
+
+// decodeDump 读导出文件，同时兼容旧版本（只有 items 字段）的格式。
+//
+// 兼容不是客套：老版本导出的文件现在还在别人机器上，读不了就等于
+// 「升级之后，上次的备份恢复不进去」——这是最容易在出事那天才发现的坑。
+func decodeDump(r io.Reader) (*store.Dump, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, 512<<20))
+	if err != nil {
+		return nil, err
+	}
+	var d store.Dump
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return nil, fmt.Errorf("解析导出文件: %w", err)
+	}
+	if d.Version == 0 {
+		var legacy struct {
+			Items []*store.Entry `json:"items"`
+		}
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			return nil, fmt.Errorf("解析导出文件: %w", err)
+		}
+		if len(legacy.Items) == 0 {
+			return nil, errors.New("无法识别的导出文件：既不是当前格式，也没有可用的 items")
+		}
+		d.Version, d.Cache = 1, legacy.Items
+	}
+	return &d, nil
 }
 
 // cmdKeygen 生成随机 API Key。

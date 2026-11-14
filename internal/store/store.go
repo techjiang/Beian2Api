@@ -3,12 +3,15 @@
 package store
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,12 +79,32 @@ type Store struct {
 	// 没有上限的部署跑上一年就是无限增长，而这个上限本身就是配置项。
 	retainChanges int
 	retainHistory int
+	// retainHistoryTotal 是历史快照的**全局**条数上限。
+	//
+	// 按域名分别算的配额有个前提：域名数量是有界的。但 /api/v1/query
+	// 是公开接口，随便刷一批随机域名，每个域名一条快照，各自都没超限，
+	// 合起来却能让数据文件无限长——按域名算的配额对「只查一次」的域名完全无效。
+	retainHistoryTotal int
+
+	// lastPurge 是上次清理过期缓存的时间戳（Unix 秒）。
+	// 清理是 O(缓存条目数) 的全表遍历，跟着 15 秒的维护节奏跑，
+	// 十万条缓存就是每 15 秒扫十万条。真正该有的是「定期」而不是「频繁」。
+	lastPurge int64
+
+	// staleMax 是「过期数据还能被回退使用」的窗口（秒）。
+	// 缓存条目过期之后并不立即无用：上游全挂时 service 还会回退到它，
+	// 但最多回退这么久。超过这个窗口的条目永远不会再被读到，属于纯垃圾。
+	staleMax int64
 }
 
 // 默认保留上限：变更流水 2000 条，每个域名历史快照 200 条。
 const (
 	DefaultRetainChanges = 2000
 	DefaultRetainHistory = 200
+	// DefaultStaleWindow 对应「上游全挂时最多回退 7 天前的快照」。
+	DefaultStaleWindow = 7 * 86400
+	// DefaultRetainHistoryTotal 是历史快照的全局上限（跨域名）。
+	DefaultRetainHistoryTotal = 20000
 )
 
 // Open 打开（或创建）数据目录下的数据文件。
@@ -106,6 +129,7 @@ func OpenFile(path string) (*Store, error) {
 	s := &Store{
 		db: db, path: path, counters: map[string]int64{}, base: map[string]int64{},
 		retainChanges: DefaultRetainChanges, retainHistory: DefaultRetainHistory,
+		retainHistoryTotal: DefaultRetainHistoryTotal, staleMax: DefaultStaleWindow,
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{bucketCache, bucketHistory, bucketWatch, bucketMeta, bucketKeys, bucketChanges, bucketNotify} {
@@ -123,15 +147,24 @@ func OpenFile(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	// 老版本的历史快照没有上限，可能早就堆了上千条。这里清一次，
-	// 之后由 AppendHistory 在写入时就地裁，不必再全表扫。
-	if s.retainHistory > 0 {
-		if _, err := s.TrimHistory(0); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("初始化历史快照保留上限: %w", err)
-		}
-	}
 	return s, nil
+}
+
+// Prepare 按当前保留上限做一次全表整理，供服务启动时调用。
+//
+// 这个不能放进 Open：打开文件时还不知道用户的配置，只能拿默认值 200 去裁——
+// 于是配了 `retain_history: 0`（明确表示「不裁剪」）的部署，每次重启都会被
+// 悄悄砍到 200 条，而且配置文件上看不出任何异常。裁剪是删数据，必须等
+// 配置加载完、WithRetention 生效之后再做，也只由 serve 触发；
+// 只读命令（doctor / export / backup）不该顺手删别人的历史。
+func (s *Store) Prepare() error {
+	if s.retainHistory <= 0 {
+		return nil
+	}
+	if _, err := s.TrimHistory(0); err != nil {
+		return fmt.Errorf("整理历史快照: %w", err)
+	}
+	return nil
 }
 
 // Size 返回数据文件字节数；取不到时返回 0（统计用，不该影响接口）。
@@ -207,7 +240,10 @@ func (s *Store) AppendHistory(r model.Record) error {
 		if err := bk.Put(key, b); err != nil {
 			return err
 		}
-		return trimHistoryDomain(bk, r.Domain, s.retainHistory)
+		if err := trimHistoryDomain(bk, r.Domain, s.retainHistory); err != nil {
+			return err
+		}
+		return trimHistoryTotal(bk, s.retainHistoryTotal)
 	})
 }
 
@@ -230,6 +266,56 @@ func trimHistoryDomain(b *bolt.Bucket, domain string, keep int) error {
 	}
 	for _, k := range keys[:len(keys)-keep] {
 		if err := b.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// trimHistoryTotal 把整个历史 bucket 裁到 keep 条以内，从最旧的删。
+//
+// key 是「域名\x00天\x00时间戳\x00指纹」，字典序不等于时间序，所以只能
+// 先按时间戳找最旧的那些——这一趟是 O(全表)。
+//
+// 所以不能每次写入都跑：上限 2 万条时，每写一条扫 2 万条，就变成前面
+// 刚挪走的那个「定时全表扫描」换了个位置。这里留一段余量（10%），
+// 攒够了再裁一次并裁回上限，摊下来是「每 2000 次写入扫一趟全表」。
+func trimHistoryTotal(b *bolt.Bucket, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	total := b.Stats().KeyN
+	slack := keep / 10
+	if slack < 10 {
+		slack = 10
+	}
+	if total <= keep+slack {
+		return nil
+	}
+	type item struct {
+		key []byte
+		ts  int64
+	}
+	items := make([]item, 0, total)
+	c := b.Cursor()
+	for k, _ := c.First(); k != nil; k, _ = c.Next() {
+		// key 形如 domain\x00day\x00ts\x00fp，取第三段当时间戳。
+		parts := bytes.SplitN(k, []byte{0}, 4)
+		if len(parts) < 3 {
+			continue
+		}
+		ts, err := strconv.ParseInt(string(parts[2]), 10, 64)
+		if err != nil {
+			continue
+		}
+		items = append(items, item{key: append([]byte(nil), k...), ts: ts})
+	}
+	if len(items) <= keep {
+		return nil
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ts < items[j].ts })
+	for _, it := range items[:len(items)-keep] {
+		if err := b.Delete(it.key); err != nil {
 			return err
 		}
 	}
@@ -529,6 +615,70 @@ func (s *Store) Retention() (changes, history int) {
 	return s.retainChanges, s.retainHistory
 }
 
+// WithStaleWindow 设置「过期缓存仍可回退」的窗口（秒），<=0 回落到默认值。
+//
+// 缓存 bucket 的 key 是域名，同一域名只占一行，所以它不会因为查询次数膨胀，
+// 但会因为「查过的域名有多少个」膨胀——而域名数量是没有上限的。
+// 配合公开的查询接口，随便刷一批随机域名就能让数据文件一直长。
+func (s *Store) WithStaleWindow(sec int) *Store {
+	if sec > 0 {
+		s.staleMax = int64(sec)
+	}
+	return s
+}
+
+// WithHistoryTotal 设置历史快照的全局条数上限（0 表示不限制）。
+func (s *Store) WithHistoryTotal(n int) *Store {
+	s.retainHistoryTotal = n
+	return s
+}
+
+// RetentionTotal 返回历史快照的全局上限。
+func (s *Store) RetentionTotal() int { return s.retainHistoryTotal }
+
+// StaleWindow 返回当前回退窗口（秒）。
+func (s *Store) StaleWindow() int64 { return s.staleMax }
+
+// PurgeEvery 是过期缓存清理的最小间隔（秒）。
+const PurgeEvery = 3600
+
+// PurgeExpired 删除过期且超出回退窗口的缓存条目，返回删除条数。
+//
+// 为什么可以删：service 命中缓存要求 ExpireAt > now，回退快照还要求
+// 「抓取时间距今不超过 stale_max」。两条加起来，ExpireAt 早于
+// now-stale_max 的条目已经没有任何代码路径会读到，留着只是占文件。
+func (s *Store) PurgeExpired(now int64) (int, error) {
+	s.mu.Lock()
+	if now-s.lastPurge < PurgeEvery {
+		s.mu.Unlock()
+		return 0, nil
+	}
+	s.lastPurge = now
+	s.mu.Unlock()
+
+	cutoff := now - s.staleMax
+	removed := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketCache)
+		var stale [][]byte
+		_ = b.ForEach(func(k, v []byte) error {
+			var e Entry
+			if json.Unmarshal(v, &e) == nil && e.ExpireAt > 0 && e.ExpireAt < cutoff {
+				stale = append(stale, append([]byte(nil), k...))
+			}
+			return nil
+		})
+		for _, k := range stale {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		removed = len(stale)
+		return nil
+	})
+	return removed, err
+}
+
 // TrimChanges 只保留最近的 keep 条变更流水，返回删除条数。
 //
 // key 是「时间戳-域名」的定宽前綴，字典序即时间序，所以从最旧的一头删。
@@ -625,12 +775,20 @@ func (s *Store) Maintain() (MaintResult, error) {
 	}
 	n, err := s.TrimChanges(0)
 	r.ChangesTrimmed = n
+	if err != nil {
+		return r, err
+	}
+	// 缓存条目一旦超出回退窗口就永远读不到了，顺手清掉——
+	// 否则「查过的域名」这个集合只会越来越大，数据文件跟着一起长。
+	purged, err := s.PurgeExpired(time.Now().Unix())
+	r.CachePurged = purged
 	return r, err
 }
 
 // MaintResult 是一次维护的结果。
 type MaintResult struct {
 	ChangesTrimmed int `json:"changes_trimmed"`
+	CachePurged    int `json:"cache_purged"`
 }
 
 // AppendChange 记录一条变更事件，key 按时间倒序可遍历。
@@ -699,6 +857,208 @@ func (s *Store) NotifyStates() (map[string]notify.State, error) {
 		})
 	})
 	return out, err
+}
+
+// Dump 是跨机器迁移用的完整数据快照。
+//
+// 之前 export/import 只搬缓存，于是 README 里说的「跨机器迁移用 JSON」其实
+// 一半是假的：迁移完监控列表、历史快照、变更流水、推送通道状态全丢，
+// 用户会以为「换个机器就什么都没了」。要搬就搬干净。
+type Dump struct {
+	Version    int               `json:"version"`
+	ExportedAt int64             `json:"exported_at"`
+	Cache      []*Entry          `json:"cache"`
+	History    []model.Record    `json:"history"`
+	Watch      []WatchItem       `json:"watch"`
+	Changes    []json.RawMessage `json:"changes"`
+	Notify     []notify.State    `json:"notify"`
+	Counters   map[string]int64  `json:"counters"`
+}
+
+// DumpVersion 是当前导出格式版本。
+const DumpVersion = 2
+
+// Dump 在同一个读事务里取出全部数据，保证导出的是某一时刻的一致快照。
+func (s *Store) Dump() (*Dump, error) {
+	d := &Dump{Version: DumpVersion, ExportedAt: time.Now().Unix(), Counters: map[string]int64{}}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketCache).ForEach(func(k, v []byte) error {
+			var e Entry
+			if json.Unmarshal(v, &e) == nil {
+				d.Cache = append(d.Cache, &e)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketHistory).ForEach(func(k, v []byte) error {
+			var r model.Record
+			if json.Unmarshal(v, &r) == nil {
+				d.History = append(d.History, r)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketWatch).ForEach(func(k, v []byte) error {
+			var w WatchItem
+			if json.Unmarshal(v, &w) == nil {
+				d.Watch = append(d.Watch, w)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketChanges).ForEach(func(k, v []byte) error {
+			d.Changes = append(d.Changes, append(json.RawMessage(nil), v...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketNotify).ForEach(func(k, v []byte) error {
+			var st notify.State
+			if json.Unmarshal(v, &st) == nil {
+				d.Notify = append(d.Notify, st)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketMeta).ForEach(func(k, v []byte) error {
+			if len(v) == 8 {
+				d.Counters[string(k)] = int64(binary.BigEndian.Uint64(v))
+			}
+			return nil
+		})
+	})
+	return d, err
+}
+
+// Restore 把 Dump 写回存储，单个事务完成。
+//
+// 语义分两类：
+//   - 缓存、监控列表、推送状态是「当前状态」，先清空再写入，保证新机器
+//     和旧机器一模一样，不会留下新机器上原有的残留域名；
+//   - 历史快照与变更流水是只增的日志，key 由内容决定，按 upsert 合并即可
+//     （重复导入同一份文件不会翻倍）。
+func (s *Store) Restore(d *Dump) error {
+	if d == nil {
+		return errors.New("空数据")
+	}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketCache, bucketWatch, bucketNotify} {
+			if err := clearBucket(tx.Bucket(name)); err != nil {
+				return err
+			}
+		}
+		cache := tx.Bucket(bucketCache)
+		for _, e := range d.Cache {
+			if e == nil || e.Domain == "" {
+				continue
+			}
+			buf, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			if err := cache.Put([]byte(e.Domain), buf); err != nil {
+				return err
+			}
+		}
+		hist := tx.Bucket(bucketHistory)
+		for _, r := range d.History {
+			if r.Domain == "" {
+				continue
+			}
+			buf, err := json.Marshal(r)
+			if err != nil {
+				return err
+			}
+			day := time.Unix(r.FetchedAt, 0).Format("20060102")
+			fp := r.Fingerprint()
+			if len(fp) > 12 {
+				fp = fp[:12]
+			}
+			key := []byte(fmt.Sprintf("%s\x00%s\x00%020d\x00%s", r.Domain, day, r.FetchedAt, fp))
+			if err := hist.Put(key, buf); err != nil {
+				return err
+			}
+		}
+		watch := tx.Bucket(bucketWatch)
+		for _, w := range d.Watch {
+			if w.Domain == "" {
+				continue
+			}
+			buf, err := json.Marshal(w)
+			if err != nil {
+				return err
+			}
+			if err := watch.Put([]byte(w.Domain), buf); err != nil {
+				return err
+			}
+		}
+		changes := tx.Bucket(bucketChanges)
+		for _, raw := range d.Changes {
+			var c struct {
+				Domain string `json:"domain"`
+				At     int64  `json:"at"`
+			}
+			if json.Unmarshal(raw, &c) != nil || c.Domain == "" {
+				continue
+			}
+			// key 必须从内容重建：变更流水的 key 就是「时间-域名」，
+			// 搬过来之后还得能按时间倒序遍历。
+			key := []byte(fmt.Sprintf("%020d-%s", c.At, c.Domain))
+			if err := changes.Put(key, raw); err != nil {
+				return err
+			}
+		}
+		states := tx.Bucket(bucketNotify)
+		for _, st := range d.Notify {
+			if st.Name == "" {
+				continue
+			}
+			buf, err := json.Marshal(st)
+			if err != nil {
+				return err
+			}
+			if err := states.Put([]byte(st.Name), buf); err != nil {
+				return err
+			}
+		}
+		meta := tx.Bucket(bucketMeta)
+		for name, v := range d.Counters {
+			var buf [8]byte
+			binary.BigEndian.PutUint64(buf[:], uint64(v))
+			if err := meta.Put([]byte(name), buf[:]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// 计数器在内存里有副本，导入后必须重新加载，否则会拿旧值继续累加。
+	s.cmu.Lock()
+	s.base = map[string]int64{}
+	s.counters = map[string]int64{}
+	s.cmu.Unlock()
+	return s.loadCounters()
+}
+
+// clearBucket 清空一个 bucket。bbolt 在 ForEach 里删除是官方支持的用法。
+func clearBucket(b *bolt.Bucket) error {
+	var keys [][]byte
+	_ = b.ForEach(func(k, v []byte) error {
+		keys = append(keys, append([]byte(nil), k...))
+		return nil
+	})
+	for _, k := range keys {
+		if err := b.Delete(k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PurgeNotifyState 删除不在 names 里的通道状态，避免改配置后遗留幽灵通道。

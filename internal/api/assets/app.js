@@ -57,7 +57,7 @@
       } catch (err) { /* 隐私模式下写不了，就当这次会话有效 */ }
       $('#keybox').hidden = !!v;
       refreshRSS();
-      loadStats(); loadWatch(); loadChanges(); loadNotify();
+      loadStats(); loadWatch(); loadChanges(); loadNotify(); loadProviders();
       if (input.value.trim()) submit();
     });
   }
@@ -233,9 +233,17 @@
         $('#s-size').textContent = fmtSize(s.storage.size_bytes);
         var rc = s.storage.retain_changes;
         $('#s-retain').textContent = rc > 0 ? '变更保留 ' + num(rc) + ' 条' : '变更不裁剪';
-        $('#s-retain').title = s.storage.retain_history > 0
-          ? '每个域名保留最近 ' + s.storage.retain_history + ' 条历史快照'
-          : '历史快照不裁剪';
+        var tips = [];
+        tips.push(s.storage.retain_history > 0
+          ? '每个域名保留最近 ' + num(s.storage.retain_history) + ' 条历史快照'
+          : '历史快照不裁剪');
+        if (s.storage.retain_history_total > 0) {
+          tips.push('历史快照全局最多 ' + num(s.storage.retain_history_total) + ' 条');
+        }
+        if (s.storage.stale_window > 0) {
+          tips.push('超过 ' + fmtDur(s.storage.stale_window) + '没更新的缓存会被清理');
+        }
+        $('#s-retain').title = tips.join('；');
       }
     }).catch(function () {});
   }
@@ -404,6 +412,54 @@
   var cRefresh = $('#c-refresh');
   if (cRefresh) cRefresh.onclick = loadChanges;
 
+  /* ---- 数据源面板 ---- */
+  var pList = $('#p-list');
+
+  function loadProviders() {
+    if (!pList) return;
+    api('/api/v1/providers').then(function (d) {
+      var list = d.providers || [];
+      var on = list.filter(function (p) { return p.enabled; });
+      $('#p-total').textContent = on.length + ' / ' + list.length + ' 启用';
+      pList.innerHTML = '';
+      if (!list.length) {
+        pList.appendChild(el('div', 'hint small-hint', '没有配置任何数据源。'));
+        return;
+      }
+      var box = el('div', 'row-list');
+      list.forEach(function (p) {
+        var row = el('div', 'row');
+        var dom = el('div', 'dom');
+        dom.appendChild(el('span', null, p.name));
+        row.appendChild(dom);
+
+        var sub = el('div', 'sub', '权重 ' + p.weight + ' · 超时 ' + p.timeout + ' 秒');
+        row.appendChild(sub);
+
+        if (!p.enabled) {
+          row.appendChild(el('span', 'badge gray', '已禁用'));
+        } else if (p.name === 'apihz' && !p.custom_credential) {
+          // 公共测试凭据被限流时不会报错，只会「偶尔查不到」。
+          // 界面上不点名，用户永远想不到是凭据的问题。
+          var w = el('span', 'badge warn', '公共凭据');
+          w.title = '正在使用公共测试凭据，被限流时只表现为查不到。建议在配置里填自己的 id / key。';
+          row.appendChild(w);
+        } else if (p.custom_credential) {
+          row.appendChild(el('span', 'badge', '自有凭据'));
+        } else {
+          row.appendChild(el('span', 'badge', '参与竞速'));
+        }
+        box.appendChild(row);
+      });
+      pList.appendChild(box);
+    }).catch(function (e) {
+      pList.innerHTML = '';
+      pList.appendChild(el('div', 'err-box', '数据源读取失败：' + e.message));
+    });
+  }
+  var pRefresh = $('#p-refresh');
+  if (pRefresh) pRefresh.onclick = loadProviders;
+
   /* ---- 推送通道 ---- */
   var nList = $('#n-list');
   var kindName = { dingtalk: '钉钉', wecom: '企业微信', feishu: '飞书', slack: 'Slack', generic: 'HTTP' };
@@ -482,13 +538,14 @@
   // 「改了会通知」这件事在网页上就等于没发生。标签页不可见时不拉，省流量。
   setInterval(function () {
     if (document.hidden) return;
-    loadWatch(); loadChanges(); loadNotify();
+    loadWatch(); loadChanges(); loadNotify(); loadProviders();
   }, 60000);
 
   refreshRSS();
   loadWatch();
   loadChanges();
   loadNotify();
+  loadProviders();
 
   // 已经存着 Key 但服务端还没要求时，先探一次：这样「Key 失效」也能被及时发现。
   if (apiKey()) {

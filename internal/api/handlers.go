@@ -240,10 +240,38 @@ func (s *Server) handleWatchRun(w http.ResponseWriter, r *http.Request) {
 	// 不能直接把请求的 ctx 交给巡检：浏览器关掉页面、代理超时都会取消它，
 	// 一轮巡检就停在中途——域名各自写了一半状态，基线也可能停在半新半旧。
 	// 巡检该跑完，请求方断连只影响它自己拿不到结果。
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Minute)
+	//
+	// 窗口也不能写死 2 分钟：之前是固定值，监控 200 个域名、4 个 worker、
+	// 每个域名 30 秒超时，一轮要跑 25 分钟——窗口一到就被取消，剩下的大半
+	// 域名状态全停在中途。现在按「域名数 / worker 数 × 单域名超时」估算。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.watchRunWindow())
 	defer cancel()
 	changes := s.watch.RunOnce(ctx)
 	writeOK(w, map[string]any{"changes": changes, "count": len(changes)})
+}
+
+// watchRunWindow 估算一轮巡检需要多久，并在估算值上加一段余量。
+func (s *Server) watchRunWindow() time.Duration {
+	const perDomain = 30 * time.Second // 与 watch.check 的单域名超时一致
+	const cushion = 30 * time.Second
+	window := 2 * time.Minute
+	if s.watch != nil {
+		total := s.watch.Status(s.cfg.Watch.Enabled).Total
+		workers := s.cfg.Watch.Workers
+		if workers <= 0 {
+			workers = 1
+		}
+		rounds := (total + workers - 1) / workers
+		if d := time.Duration(rounds)*perDomain + cushion; d > window {
+			window = d
+		}
+	}
+	// 上限 30 分钟：再长的话，反代和浏览器的超时都已经先到了，
+	// 给一个跑不完的窗口只是让请求方一直等。
+	if window > 30*time.Minute {
+		window = 30 * time.Minute
+	}
+	return window
 }
 
 // handleWatchStatus 返回巡检概况：是否在跑、上一轮何时、下一轮何时。
@@ -289,9 +317,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"data_file": s.svc.Store().Path(),
 		// 存储占用与保留策略：数据文件只增不减的部署，最该被看见的就是这两个数。
 		"storage": map[string]any{
-			"size_bytes":     s.svc.Store().Size(),
-			"retain_changes": retainChanges,
-			"retain_history": retainHistory,
+			"size_bytes":           s.svc.Store().Size(),
+			"retain_changes":       retainChanges,
+			"retain_history":       retainHistory,
+			"retain_history_total": s.svc.Store().RetentionTotal(),
+			"stale_window":         s.svc.Store().StaleWindow(),
 		},
 	})
 }
@@ -303,10 +333,16 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		Enabled bool   `json:"enabled"`
 		Weight  int    `json:"weight"`
 		Timeout int    `json:"timeout"`
+		// CustomCredential 表示这个源是否配了自己的凭据。
+		// apihz 不配就只能用公共测试凭据，被限流时无从排查——这一点该看得见。
+		CustomCredential bool `json:"custom_credential"`
 	}
 	out := make([]item, 0, len(s.cfg.Providers))
 	for _, p := range s.cfg.Providers {
-		out = append(out, item{Name: p.Name, Enabled: p.Enabled && p.Weight > 0, Weight: p.Weight, Timeout: p.Timeout})
+		out = append(out, item{
+			Name: p.Name, Enabled: p.Enabled && p.Weight > 0, Weight: p.Weight,
+			Timeout: p.Timeout, CustomCredential: p.HasCredential,
+		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Weight > out[j].Weight })
 	writeOK(w, map[string]any{"providers": out})

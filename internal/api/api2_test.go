@@ -569,3 +569,84 @@ func TestIndexStaysPublicWithAuth(t *testing.T) {
 		t.Fatalf("首页应可访问且带 API Key 输入框，实际 %d", resp.StatusCode)
 	}
 }
+
+// 徽章是公开接口（README 的 <img> 带不了请求头），但它每个请求都可能触发一次
+// 回源。之前它既不过鉴权也不限流，等于给全网开了一个「随便填域名就能让服务器
+// 去查上游」的放大器：实测连刷 120 次全 200，同时 /api/v1/query 已经 429。
+func TestBadgeIsRateLimited(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) {
+		c.RateLimit.Enabled = true
+		c.RateLimit.RPS = 1
+		c.RateLimit.Burst = 2
+	})
+	limited := false
+	for i := 0; i < 12; i++ {
+		resp, _ := get(t, h, "/badge/icp.svg?domain=example.com", nil)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			limited = true
+		}
+	}
+	if !limited {
+		t.Fatal("徽章接口应受限流约束")
+	}
+}
+
+// 徽章不需要 API Key：README 里的 Markdown 图片请求带不了自定义请求头。
+// 这个「不用 Key」是有意为之，所以更需要限流兜底——两条一起测，防止后人
+// 为了「安全」把 badge 也塞进鉴权，把所有人的 README 图打红。
+func TestBadgeStaysPublicWithAuthEnabled(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) {
+		c.Auth.Enabled = true
+		c.Auth.Keys = []string{"bk_test"}
+	})
+	resp, body := get(t, h, "/badge/icp.svg?domain=example.com", nil)
+	if resp.StatusCode != 200 || !strings.HasPrefix(body, "<svg") {
+		t.Fatalf("开了鉴权后徽章仍应公开可读: %d %s", resp.StatusCode, body)
+	}
+}
+
+// 巡检窗口不能写死 2 分钟：域名多、worker 少时一轮本来就要跑几十分钟，
+// 到点被取消等于大半域名状态停在中途。
+func TestWatchRunWindowScalesWithDomainCount(t *testing.T) {
+	s, _, _ := mkWatchServer(t)
+	s.cfg.Watch.Workers = 4
+	for i := 0; i < 200; i++ {
+		if err := s.svc.Store().PutWatch(&store.WatchItem{Domain: fmt.Sprintf("d%d.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 200 / 4 = 50 轮 × 30 秒 = 25 分钟，加上余量
+	if w := s.watchRunWindow(); w < 20*time.Minute {
+		t.Fatalf("200 个域名的巡检窗口应长于 20 分钟，实际 %s", w)
+	}
+	// 但不能无限长：反代和浏览器早就超时了
+	s.cfg.Watch.Workers = 1
+	for i := 0; i < 5000; i++ {
+		if err := s.svc.Store().PutWatch(&store.WatchItem{Domain: fmt.Sprintf("e%d.com", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w := s.watchRunWindow(); w > 30*time.Minute {
+		t.Fatalf("巡检窗口应有 30 分钟上限，实际 %s", w)
+	}
+}
+
+// 只有少量域名时窗口仍保持 2 分钟的宽松默认值，不要因为算出来 30 秒就收紧。
+func TestWatchRunWindowHasTwoMinuteFloor(t *testing.T) {
+	s, _, _ := mkWatchServer(t)
+	if w := s.watchRunWindow(); w < 2*time.Minute {
+		t.Fatalf("窗口不该小于 2 分钟，实际 %s", w)
+	}
+}
+
+// stats 要把新的保留策略一并暴露出来：看不到就等于没有，
+// 用户没法判断「数据文件该不该担心」。
+func TestStatsExposesRetentionPolicy(t *testing.T) {
+	_, h := mkServer(t, nil)
+	_, body := get(t, h, "/api/v1/stats", nil)
+	for _, k := range []string{"retain_history_total", "stale_window", "retain_changes", "size_bytes"} {
+		if !strings.Contains(body, k) {
+			t.Fatalf("stats 缺少 %s: %s", k, body)
+		}
+	}
+}

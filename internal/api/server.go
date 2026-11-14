@@ -88,9 +88,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/admin/backup", s.withRateLimit(s.withAuth(s.handleAdminBackup)))
 	mux.HandleFunc("/api/v1/openapi.json", s.handleOpenAPI)
 
-	// 徽章与运维
-	mux.HandleFunc("/badge/icp.svg", s.handleBadge)
-	mux.HandleFunc("/badge/icp", s.handleBadge)
+	// 徽章与运维。
+	//
+	// 徽章必须公开（README 里的 <img> 带不了请求头），但正因为公开，
+	// 它不能裸奔：每个请求都可能触发一次回源，等于给全网开了一个
+	// 「填任意域名就能让服务器去查一次上游」的放大器，而它又不占鉴权、
+	// 不限流——之前实测连刷 120 次全部 200，同时 /api/v1/query 已经 429。
+	mux.HandleFunc("/badge/icp.svg", s.withRateLimit(s.handleBadge))
+	mux.HandleFunc("/badge/icp", s.withRateLimit(s.handleBadge))
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 

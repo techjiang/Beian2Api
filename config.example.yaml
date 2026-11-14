@@ -33,8 +33,11 @@ cors:
 storage:
   # 只增数据（变更流水、历史快照）的滚动保留上限，0 表示不裁剪。
   # 不设上限的部署跑上一年，数据文件会一直长大，而首页只看最近 10 条。
-  retain_changes: 2000    # 变更流水保留最近多少条（全局）
-  retain_history: 200     # 每个域名保留多少条历史快照（按域名分别算）
+  retain_changes: 2000      # 变更流水保留最近多少条（全局）
+  retain_history: 200       # 每个域名保留多少条历史快照（按域名分别算）
+  # 历史快照的全局上限（跨所有域名）。只有按域名的配额挡不住「刷一批随机域名各查一次」，
+  # 每个域名都没超限，合起来却能无限长。不能小于 retain_history。
+  retain_history_total: 20000
 
 providers:
   # weight 越大越优先，0 表示禁用
@@ -46,6 +49,10 @@ providers:
     enabled: true
     weight: 40
     timeout: 8
+    # 不填则用公共测试凭据。公共凭据被限流时不会报错，只表现为「偶尔查不到」，
+    # 生产环境建议填自己的（免费注册）：
+    # id: "你的 id"
+    # key: "你的 key"
 
 watch:
   enabled: true

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/asoe/beian2api/internal/notify"
@@ -70,6 +71,15 @@ func cmdDoctor(args []string) error {
 			fmt.Printf("  ✔ %-8s %6.0fms  连通（该域名无备案）\n", t.Provider.Name(), cost)
 		default:
 			fmt.Printf("  ! %-8s %6.0fms  %v\n", t.Provider.Name(), cost, err)
+		}
+	}
+
+	// 凭据是否已换：apihz 用公共测试凭据时会被限流，而界面上看不出任何异常，
+	// 只能表现为「偶尔查不到」。这一点必须在自检里说清楚。
+	for _, p := range cfg.Providers {
+		if strings.EqualFold(p.Name, "apihz") && p.Enabled && p.Weight > 0 && !p.HasCredential {
+			fmt.Println("  ! apihz   仍在使用公共测试凭据，被限流时只会表现为「查不到」")
+			fmt.Println("            建议在 config.yaml 里填 providers[].id / key，或设 BEIAN2API_APIHZ_ID/KEY")
 		}
 	}
 

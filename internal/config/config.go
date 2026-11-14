@@ -19,6 +19,13 @@ type Provider struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Weight  int    `yaml:"weight" json:"weight"`
 	Timeout int    `yaml:"timeout" json:"timeout"` // 秒
+	// ID / Key 是第三方接口凭据，目前只有 apihz 用得上。
+	// 用 yaml/json 双标签而不是只管 yaml：`beian2api config` 要能看出
+	// 凭据「配了没配」，但值本身不该出现在任何对外 JSON 里，所以 json 用 "-"。
+	ID  string `yaml:"id" json:"-"`
+	Key string `yaml:"key" json:"-"`
+	// HasCredential 用于 dump 时提示凭据是否已配置（不泄露内容）。
+	HasCredential bool `yaml:"-" json:"has_credential,omitempty"`
 }
 
 // Config 是全部运行时配置。
@@ -72,6 +79,11 @@ type Config struct {
 	Storage struct {
 		RetainChanges int `yaml:"retain_changes" json:"retain_changes"`
 		RetainHistory int `yaml:"retain_history" json:"retain_history"`
+		// RetainHistoryTotal 是历史快照的全局上限（跨所有域名）。
+		//
+		// 只有按域名的配额是不够的：/api/v1/query 公开可调，随便刷一批随机
+		// 域名，每个域名一条快照、各自都没超限，合起来却能让文件无限长。
+		RetainHistoryTotal int `yaml:"retain_history_total" json:"retain_history_total"`
 	} `yaml:"storage" json:"storage"`
 
 	CORS []string `yaml:"cors" json:"cors"`
@@ -116,6 +128,7 @@ func Default() *Config {
 	c.Notify.Retries = 3
 	c.Storage.RetainChanges = 2000
 	c.Storage.RetainHistory = 200
+	c.Storage.RetainHistoryTotal = 20000
 	c.Providers = []Provider{
 		{Name: "miit", Enabled: true, Weight: 100, Timeout: 8},
 		{Name: "apihz", Enabled: true, Weight: 40, Timeout: 8},
@@ -173,6 +186,11 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("BEIAN2API_PROVIDERS"); v != "" {
 		c.Providers = parseProviders(v)
 	}
+	// 凭据单独给环境变量：一行 BEIAN2API_PROVIDERS 里塞不下，
+	// 而且凭据不该和「要不要启用某个源」混在一起。
+	if v := os.Getenv("BEIAN2API_APIHZ_ID"); v != "" {
+		applyProviderCredential(c.Providers, "apihz", v, os.Getenv("BEIAN2API_APIHZ_KEY"))
+	}
 	if v := os.Getenv("BEIAN2API_WEBHOOK"); v != "" {
 		c.Watch.Webhook = v
 	}
@@ -205,6 +223,11 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("BEIAN2API_RETAIN_HISTORY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.Storage.RetainHistory = n
+		}
+	}
+	if v := os.Getenv("BEIAN2API_RETAIN_HISTORY_TOTAL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Storage.RetainHistoryTotal = n
 		}
 	}
 	if v := os.Getenv("BEIAN2API_TTL"); v != "" {
@@ -246,6 +269,16 @@ func parseProviders(v string) []Provider {
 		out = append(out, Provider{Name: name, Enabled: w > 0, Weight: w, Timeout: 8})
 	}
 	return out
+}
+
+// applyProviderCredential 给某个数据源填凭据，源不存在时忽略。
+func applyProviderCredential(ps []Provider, name, id, key string) {
+	for i := range ps {
+		if strings.EqualFold(ps[i].Name, name) {
+			ps[i].ID, ps[i].Key = id, key
+			return
+		}
+	}
 }
 
 // knownEvents 是推送可订阅的事件全集，与 notify 包中的事件常量一一对应。
@@ -322,8 +355,18 @@ func (c *Config) Validate() error {
 			ch.Events[j] = e
 		}
 	}
-	if c.Storage.RetainChanges < 0 || c.Storage.RetainHistory < 0 {
-		return fmt.Errorf("storage.retain_changes / retain_history 不能为负数")
+	if c.Storage.RetainChanges < 0 || c.Storage.RetainHistory < 0 || c.Storage.RetainHistoryTotal < 0 {
+		return fmt.Errorf("storage.retain_changes / retain_history / retain_history_total 不能为负数")
+	}
+	if c.Storage.RetainHistoryTotal == 0 {
+		c.Storage.RetainHistoryTotal = 20000
+	}
+	if c.Storage.RetainHistory > 0 && c.Storage.RetainHistoryTotal > 0 &&
+		c.Storage.RetainHistoryTotal < c.Storage.RetainHistory {
+		// 全局上限比单域名上限还小，等于所有域名共用一份配额，
+		// 写入时会被立刻裁掉，历史基本存不住。这几乎必然是配错了。
+		return fmt.Errorf("storage.retain_history_total(%d) 不能小于 retain_history(%d)",
+			c.Storage.RetainHistoryTotal, c.Storage.RetainHistory)
 	}
 	for i := range c.Providers {
 		if c.Providers[i].Name == "" {
@@ -332,6 +375,7 @@ func (c *Config) Validate() error {
 		if c.Providers[i].Timeout <= 0 {
 			c.Providers[i].Timeout = 8
 		}
+		c.Providers[i].HasCredential = c.Providers[i].ID != "" && c.Providers[i].Key != ""
 	}
 	sortProviders(c.Providers)
 	return nil

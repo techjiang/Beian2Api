@@ -35,6 +35,13 @@ type Provider interface {
 type Options struct {
 	Timeout time.Duration
 	HTTP    *http.Client
+	// ID / Key 是第三方接口的凭据（目前只有 apihz 用得上）。
+	//
+	// 之前这两个值只存在于 apihz 适配器内部的常量里，配置里根本没有
+	// 能填它的地方——README 写着「生产环境建议换成自己的」，而实际上
+	// 换不了，所有人都只能挤同一份公共测试凭据，被限流时束手无策。
+	ID  string
+	Key string
 }
 
 // NewHTTPClient 返回一个带连接池与超时的 HTTP 客户端。
@@ -68,7 +75,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{factories: map[string]func(Options) Provider{}}
 	r.Register("miit", func(o Options) Provider { return NewMIIT(o) })
-	r.Register("apihz", func(o Options) Provider { return NewAPIHZ(o) })
+	r.Register("apihz", func(o Options) Provider { return NewAPIHZ(o).WithCredential(o.ID, o.Key) })
 	r.Register("mock", NewMock)
 	return r
 }

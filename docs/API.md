@@ -447,19 +447,39 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
     "storage": {
       "size_bytes": 32768,
       "retain_changes": 2000,
-      "retain_history": 200
+      "retain_history": 200,
+      "retain_history_total": 20000,
+      "stale_window": 604800
     }
   }
 }
 ```
 
-`storage` 是数据文件的实际大小与两个滚动保留上限（`0` 表示不裁剪）。
+`storage` 是数据文件的实际大小与滚动保留策略（上限为 `0` 表示不裁剪）：
+`retain_changes` 是变更流水条数，`retain_history` 是每个域名的历史快照条数，
+`retain_history_total` 是历史快照的全局条数上限，`stale_window` 是「过期缓存还能
+被回退使用」的窗口（秒），超出这个窗口的缓存条目会被定期清理。
 计数器（命中 / 回源 / 快照回退）在内存里累加、每 15 秒刷盘一次，
 所以这里的数字最多滞后十几秒——用这点新鲜度换掉每次请求一次 fsync，很划算。
 
 ## GET /api/v1/providers
 
-各数据源的启用状态、权重与超时配置。
+各数据源的启用状态、权重、超时，以及是否配了自有凭据。
+
+```json
+{
+  "ok": true,
+  "data": {
+    "providers": [
+      { "name": "miit", "enabled": true, "weight": 100, "timeout": 8, "custom_credential": false },
+      { "name": "apihz", "enabled": true, "weight": 40, "timeout": 8, "custom_credential": false }
+    ]
+  }
+}
+```
+
+`custom_credential` 目前只对 apihz 有意义：它为 `false` 时用的就是公共测试凭据，
+被限流时不会报错，只表现为「偶尔查不到」。
 
 权重会实际影响竞速：权重最高的源立刻出发，其余按权重差按比例延后起跑
 （最多 200ms）。这是对冲而不是排队——高权重源慢了或者挂了，低权重源照样接手，

@@ -409,3 +409,234 @@ func TestAppendHistorySameInstantDedupes(t *testing.T) {
 		t.Fatalf("同一时刻同内容应只有 1 条，实际 %d", c.History)
 	}
 }
+
+// 打开文件时不能拿默认上限去裁历史：那时配置还没加载，用户明明写了
+// retain_history: 0（不裁剪），重启一次就被砍到 200 条，配置文件上看不出异常。
+func TestPrepareRespectsConfiguredRetention(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WithRetention(0, 0) // 保持配置：不裁剪
+	for i := 0; i < 260; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "a.com", ICPCode: itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := s.Count(); c.History != 260 {
+		t.Fatalf("上限为 0 时 Prepare 不该删任何历史，实际剩 %d", c.History)
+	}
+	s.Close()
+
+	// 重新打开也不该被裁——Open 自己不再做裁剪。
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if c, _ := s2.Count(); c.History != 260 {
+		t.Fatalf("重新打开文件不该裁历史，实际剩 %d", c.History)
+	}
+}
+
+// 配了上限时才裁，且裁到上限为止。
+func TestPrepareTrimsWhenConfigured(t *testing.T) {
+	s := open(t).WithRetention(0, 5)
+	for i := 0; i < 12; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "a.com", ICPCode: itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 写入时已经就地裁过，这里把上限放开塞回去，验证 Prepare 的兜底作用
+	s.WithRetention(0, 0)
+	for i := 12; i < 20; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "a.com", ICPCode: itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.WithRetention(0, 5)
+	if err := s.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := s.History("a.com", 0)
+	if len(h) != 5 || h[4].ICPCode != "19" {
+		t.Fatalf("应裁到最新 5 条，实际 %d 条: %+v", len(h), h)
+	}
+}
+
+// 过期且超出回退窗口的缓存条目永远读不到了，必须被清掉。
+func TestPurgeExpiredOnlyBeyondStaleWindow(t *testing.T) {
+	s := open(t).WithStaleWindow(1000)
+	now := int64(100000)
+	// 三条：从未过期、过期但在窗口内、过期且早于窗口
+	for _, e := range []*Entry{
+		{Domain: "fresh.com", Found: true, FetchedAt: now - 10, ExpireAt: now + 100},
+		{Domain: "recent.com", Found: true, FetchedAt: now - 500, ExpireAt: now - 100},
+		{Domain: "ancient.com", Found: true, FetchedAt: now - 5000, ExpireAt: now - 4000},
+	} {
+		if err := s.PutCache(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.PurgeExpired(now)
+	if err != nil || n != 1 {
+		t.Fatalf("只该删 1 条，实际 %d (%v)", n, err)
+	}
+	if _, err := s.GetCache("ancient.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatal("超出回退窗口的条目应被删除")
+	}
+	// 窗口内的过期条目还要留着给 service 回退用
+	if _, err := s.GetCache("recent.com"); err != nil {
+		t.Fatalf("窗口内的过期条目不该删: %v", err)
+	}
+	if _, err := s.GetCache("fresh.com"); err != nil {
+		t.Fatalf("未过期条目不该删: %v", err)
+	}
+}
+
+// 清理不能跟着 15 秒的维护节奏全表扫：限频之后第二次调用应当直接返回。
+func TestPurgeExpiredIsRateLimited(t *testing.T) {
+	s := open(t).WithStaleWindow(10)
+	now := int64(100000)
+	_ = s.PutCache(&Entry{Domain: "old.com", FetchedAt: now - 900, ExpireAt: now - 800})
+	if n, _ := s.PurgeExpired(now); n != 1 {
+		t.Fatalf("首次应清理 1 条，实际 %d", n)
+	}
+	_ = s.PutCache(&Entry{Domain: "old2.com", FetchedAt: now - 900, ExpireAt: now - 800})
+	if n, _ := s.PurgeExpired(now + 60); n != 0 {
+		t.Fatalf("间隔不足时不该再扫，实际删了 %d", n)
+	}
+	if n, _ := s.PurgeExpired(now + PurgeEvery + 1); n != 1 {
+		t.Fatalf("过了间隔应再清理，实际 %d", n)
+	}
+}
+
+// 按域名的配额挡不住「刷一批随机域名各查一次」：必须还有全局上限。
+func TestHistoryGlobalCapBoundsRandomDomains(t *testing.T) {
+	s := open(t).WithRetention(0, 100).WithHistoryTotal(50)
+	// 制造 50+10 条超限（10% 余量）之后才触发一次裁剪
+	for i := 0; i < 80; i++ {
+		d := "d" + itoa(int64(i)) + ".com"
+		if err := s.AppendHistory(model.Record{Domain: d, ICPCode: "x", FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, _ := s.Count()
+	// 留了 10% 余量（至少 10 条），所以稳态最多是 keep + slack = 60。
+	if c.History > 60 {
+		t.Fatalf("全局上限 50（含余量）没生效，实际 %d 条", c.History)
+	}
+	// 每个域名都没超自己的配额，说明拦下来的确实是全局上限
+	if c.History == 0 {
+		t.Fatal("不该清空")
+	}
+}
+
+// 导出必须带上监控、历史、变更、推送状态，否则「跨机迁移」名不副实。
+func TestDumpRestoreRoundTrip(t *testing.T) {
+	s := open(t)
+	_ = s.PutCache(&Entry{Domain: "a.com", Found: true, Source: "t", FetchedAt: 1, ExpireAt: 9999999999})
+	_ = s.AppendHistory(model.Record{Domain: "a.com", ICPCode: "京ICP备1号-1", FetchedAt: 10})
+	_ = s.AppendHistory(model.Record{Domain: "a.com", ICPCode: "京ICP备2号-1", FetchedAt: 20})
+	_ = s.PutWatch(&WatchItem{Domain: "a.com", AddedAt: 1, Changes: 3, LastFP: "fp"})
+	_ = s.AppendChange("0000000020-a.com", map[string]any{"domain": "a.com", "at": 20, "kind": "changed"})
+	_ = s.PutNotifyState(notify.State{Name: "运维群", Kind: "dingtalk", LastOK: true})
+	_, _ = s.Incr("hits", 7)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := s.Dump()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Cache) != 1 || len(d.History) != 2 || len(d.Watch) != 1 || len(d.Changes) != 1 || len(d.Notify) != 1 {
+		t.Fatalf("导出内容不全: %+v", d)
+	}
+	if d.Counters["hits"] != 7 {
+		t.Fatalf("计数器没导出: %+v", d.Counters)
+	}
+
+	// 导进一个全新的库
+	dst := open(t)
+	if err := dst.Restore(d); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := dst.Count()
+	if c.Cache != 1 || c.History != 2 || c.Watch != 1 || c.Changes != 1 || c.Notify != 1 {
+		t.Fatalf("导入后条数不对: %+v", c)
+	}
+	if h, _ := dst.History("a.com", 0); len(h) != 2 || h[1].ICPCode != "京ICP备2号-1" {
+		t.Fatalf("历史顺序不对: %+v", h)
+	}
+	if w, _ := dst.GetWatch("a.com"); w.Changes != 3 || w.LastFP != "fp" {
+		t.Fatalf("监控项没恢复: %+v", w)
+	}
+	var got []int64
+	_ = dst.ListChanges(10, func(raw []byte) (bool, error) {
+		var v struct {
+			At int64 `json:"at"`
+		}
+		_ = json.Unmarshal(raw, &v)
+		got = append(got, v.At)
+		return true, nil
+	})
+	if len(got) != 1 || got[0] != 20 {
+		t.Fatalf("变更流水没恢复: %v", got)
+	}
+	// 计数器导入后必须从落盘值重新加载，否则会拿 0 继续累加
+	if n := dst.Stat("hits"); n != 7 {
+		t.Fatalf("导入后计数器应为 7，实际 %d", n)
+	}
+	if v, _ := dst.Incr("hits", 1); v != 8 {
+		t.Fatalf("导入后继续累加应为 8，实际 %d", v)
+	}
+}
+
+// 重复导入同一份文件不该翻倍：缓存/监控是覆盖写，日志类靠内容 key 去重。
+func TestRestoreIsIdempotent(t *testing.T) {
+	s := open(t)
+	_ = s.PutCache(&Entry{Domain: "a.com", Found: true, ExpireAt: 9})
+	_ = s.AppendHistory(model.Record{Domain: "a.com", ICPCode: "x", FetchedAt: 10})
+	_ = s.PutWatch(&WatchItem{Domain: "a.com"})
+	d, _ := s.Dump()
+
+	dst := open(t)
+	for i := 0; i < 3; i++ {
+		if err := dst.Restore(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, _ := dst.Count()
+	if c.Cache != 1 || c.History != 1 || c.Watch != 1 {
+		t.Fatalf("重复导入不该翻倍: %+v", c)
+	}
+}
+
+// 导入要把「当前状态」覆盖成文件里的样子，不能留下目标库原有的域名。
+func TestRestoreOverwritesCurrentState(t *testing.T) {
+	src := open(t)
+	_ = src.PutCache(&Entry{Domain: "new.com", Found: true, ExpireAt: 9})
+	_ = src.PutWatch(&WatchItem{Domain: "new.com"})
+	d, _ := src.Dump()
+
+	dst := open(t)
+	_ = dst.PutCache(&Entry{Domain: "stale.com", Found: true, ExpireAt: 9})
+	_ = dst.PutWatch(&WatchItem{Domain: "stale.com"})
+	if err := dst.Restore(d); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dst.GetCache("stale.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatal("目标库原有的缓存应被清掉")
+	}
+	if _, err := dst.GetWatch("stale.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatal("目标库原有的监控项应被清掉")
+	}
+	if _, err := dst.GetCache("new.com"); err != nil {
+		t.Fatalf("文件里的缓存应写入: %v", err)
+	}
+}

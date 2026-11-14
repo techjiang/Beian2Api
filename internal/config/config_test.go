@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,5 +269,85 @@ func TestStorageRetentionRejectsNegative(t *testing.T) {
 	c.Storage.RetainChanges = -1
 	if err := c.Validate(); err == nil {
 		t.Fatal("负数应被拒绝")
+	}
+}
+
+// 全局历史上限必须存在且不能小于单域名上限：小于的话等于所有域名共用一份
+// 极小配额，写入即被裁，历史基本存不住，而配置上看不出问题。
+func TestStorageHistoryTotalBounds(t *testing.T) {
+	c := Default()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Storage.RetainHistoryTotal != 20000 {
+		t.Fatalf("默认全局上限不对: %d", c.Storage.RetainHistoryTotal)
+	}
+
+	bad := Default()
+	bad.Storage.RetainHistory = 500
+	bad.Storage.RetainHistoryTotal = 100
+	if err := bad.Validate(); err == nil {
+		t.Fatal("全局上限小于单域名上限时应被拒绝")
+	}
+
+	t.Setenv("BEIAN2API_RETAIN_HISTORY_TOTAL", "5000")
+	c2, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Storage.RetainHistoryTotal != 5000 {
+		t.Fatalf("环境变量覆盖失效: %d", c2.Storage.RetainHistoryTotal)
+	}
+}
+
+// apihz 没有能填凭据的地方，用户只能挤公共测试凭据——而公共凭据被限流时
+// 只表现为「偶尔查不到」，从配置上完全看不出来。
+func TestProviderCredentialFromConfig(t *testing.T) {
+	t.Setenv("BEIAN2API_APIHZ_ID", "myid")
+	t.Setenv("BEIAN2API_APIHZ_KEY", "mykey")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, p := range c.Providers {
+		if p.Name == "apihz" {
+			found = true
+			if p.ID != "myid" || p.Key != "mykey" || !p.HasCredential {
+				t.Fatalf("凭据没生效: %+v", p)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("默认配置里应有 apihz")
+	}
+}
+
+// 只填了 id 没填 key 也算没配：真实接口要求两者成对出现。
+func TestProviderCredentialNeedsBoth(t *testing.T) {
+	t.Setenv("BEIAN2API_APIHZ_ID", "myid")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range c.Providers {
+		if p.Name == "apihz" && p.HasCredential {
+			t.Fatal("只有 id 没有 key 时不该算作已配凭据")
+		}
+	}
+}
+
+// 凭据不能出现在任何对外 JSON 里：它和机器人地址一样是凭据。
+func TestProviderCredentialNotSerialized(t *testing.T) {
+	p := Provider{Name: "apihz", ID: "myid", Key: "mykey", HasCredential: true}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "mykey") || strings.Contains(string(b), "myid") {
+		t.Fatalf("凭据不该出现在 JSON 里: %s", b)
+	}
+	if !strings.Contains(string(b), "has_credential") {
+		t.Fatalf("应暴露「是否已配凭据」这个事实: %s", b)
 	}
 }
