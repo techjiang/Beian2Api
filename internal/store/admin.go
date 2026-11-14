@@ -240,11 +240,22 @@ func (s *Store) ClearChanges() (int, error) {
 	return n, err
 }
 
-// DeleteChange 按 key 删一条变更流水。
-func (s *Store) DeleteChange(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketChanges).Delete([]byte(id))
+// DeleteChange 按 key 删一条变更流水，返回是否真的删掉了一条。
+//
+// 和 DeleteCache 同一个理由：bbolt 的 Delete 对不存在的 key 返回 nil，
+// 把这个 nil 当成「删成功」，后台就会对一条不存在的记录弹「已删除」。
+// 用户接着去首页看，那条记录当然还在——于是只能怀疑按钮坏了。
+func (s *Store) DeleteChange(id string) (bool, error) {
+	existed := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketChanges)
+		if b.Get([]byte(id)) == nil {
+			return nil
+		}
+		existed = true
+		return b.Delete([]byte(id))
 	})
+	return existed, err
 }
 
 // PurgeAllWatch 清空监控列表，返回删除条数。

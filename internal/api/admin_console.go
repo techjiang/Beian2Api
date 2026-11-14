@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asoe/beian2api/internal/model"
@@ -327,11 +329,12 @@ func (s *Server) handleAdminChangeDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := fmt.Sprintf("%020d-%s", at, d)
-	if err := s.svc.Store().DeleteChange(id); err != nil {
+	deleted, err := s.svc.Store().DeleteChange(id)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"at": at, "domain": d, "deleted": true})
+	writeOK(w, map[string]any{"at": at, "domain": d, "deleted": deleted})
 }
 
 // handleAdminWatchBulk 批量加/移监控。
@@ -365,9 +368,10 @@ func (s *Server) handleAdminWatchBulk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ok []string
+	// 有效域名先去重归一化，非法项原样留着回报——用户要按原文找那一行改。
+	var clean []string
 	var bad []string
-	var dup int
+	dup := 0
 	seen := map[string]struct{}{}
 	for _, raw := range body.Domains {
 		d := model.CanonicalDomain(raw)
@@ -382,21 +386,98 @@ func (s *Server) handleAdminWatchBulk(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[d] = struct{}{}
-		if action == "add" {
-			if err := s.addWatch(r, d); err != nil {
-				bad = append(bad, raw)
-				continue
+		clean = append(clean, d)
+	}
+
+	// 写超时跟着域名数走。
+	//
+	// 每个域名要抓一次上游建基线，单域名超时 8 秒；500 个域名串行跑必然
+	// 越过 http.Server 的 30 秒 WriteTimeout——实测 400 个域名跑了 39 秒，
+	// 结果是「库里已经写进去 521 个，浏览器收到的是连接被重置」。
+	// 用户看到失败、重试、于是又加一遍。这比慢更糟：它给了个错的结论。
+	// 一个合法域名都没有：这是调用方把清单贴错了，不是「成功处理了 0 个」。
+	// 回 200 + ok:null 会让脚本以为这批域名已经加进去了。
+	if len(clean) == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_domain",
+			"域名清单里没有一个合法域名（示例：example.com）")
+		return
+	}
+
+	const workers = 5
+	if n := len(clean); n > 0 {
+		defer extendWriteDeadline(w, bulkWindow(n, workers))()
+	}
+
+	// 并发处理，和批量查询同一个并发度上限（5）。
+	//
+	// 串行不只是慢：一批 500 个域名跑十几分钟，中途关掉页面就留下一半
+	// 已加、一半没加的列表，而响应里什么都不说。
+	var mu sync.Mutex
+	var ok []string
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for _, d := range clean {
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if action == "add" {
+				if err := s.addWatch(r, d); err != nil {
+					mu.Lock()
+					bad = append(bad, d)
+					mu.Unlock()
+					return
+				}
+			} else if err := s.svc.Store().DeleteWatch(d); err != nil {
+				mu.Lock()
+				bad = append(bad, d)
+				mu.Unlock()
+				return
 			}
-		} else if err := s.svc.Store().DeleteWatch(d); err != nil {
-			bad = append(bad, raw)
-			continue
-		}
-		ok = append(ok, d)
+			mu.Lock()
+			ok = append(ok, d)
+			mu.Unlock()
+		}(d)
+	}
+	wg.Wait()
+	sort.Strings(ok)
+
+	// 全失败时别回 200 + 空列表：那看起来像「成功了，只是没加进去」。
+	if len(clean) > 0 && len(ok) == 0 {
+		writeErr(w, http.StatusBadGateway, "bulk_failed",
+			"全部域名都没处理成功，请检查上游连通性后重试")
+		return
 	}
 	writeOK(w, map[string]any{
 		"action": action, "added": len(ok), "failed": len(bad),
 		"duplicated": dup, "ok": ok, "invalid": bad,
 	})
+}
+
+// bulkWindow 估算批量加/移监控需要多久。
+//
+// 加监控要抓一次上游建基线（否则第一轮巡检会把全部字段误报成变更），
+// 所以耗时按「域名数 / 并发度 × 单域名超时」算，再留一段余量。
+// 上限 30 分钟：再长的话反代和浏览器早就先超时了，给一个跑不完的窗口
+// 只是让请求方一直等。
+func bulkWindow(n, workers int) time.Duration {
+	const perDomain = 8 * time.Second // 上游默认超时
+	if workers <= 0 {
+		workers = 1
+	}
+	rounds := (n + workers - 1) / workers
+	if rounds < 1 {
+		rounds = 1
+	}
+	d := time.Duration(rounds)*perDomain + 30*time.Second
+	if d < time.Minute {
+		d = time.Minute
+	}
+	if d > 30*time.Minute {
+		d = 30 * time.Minute
+	}
+	return d
 }
 
 // handleAdminWatchPurge 清空监控列表。

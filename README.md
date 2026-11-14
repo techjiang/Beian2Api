@@ -122,7 +122,7 @@ curl "http://localhost:8080/api/v1/query?domain=example.com"
 | GET | `/api/v1/watch/list` | 巡检列表 |
 | GET | `/api/v1/watch/status` | 巡检运行概况（是否在跑 / 上次 / 下次），分页 |
 | POST | `/api/v1/watch/run` | 立即执行一轮巡检 |
-| GET | `/api/v1/changes` | 变更事件流水（含注销、上游异常、恢复），支持 `kind` 筛选与 `offset` 翻页 |
+| GET | `/api/v1/changes` | 变更事件流水（含注销、上游异常、恢复），支持 `kind` 筛选与游标翻页（`cursor` / `next_cursor`） |
 | GET | `/api/v1/changes.rss` | 变更事件 RSS |
 | GET/POST | `/api/v1/admin/backup` | 在线生成一致性快照 |
 | GET | `/badge/icp.svg` | SVG 徽章，可直接放进 README |

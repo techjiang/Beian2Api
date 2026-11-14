@@ -30,6 +30,15 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 翻页两种方式：cursor（推荐）与 offset（兼容老调用方）。
+	//
+	// offset 是「走 N 步再开始收」——翻到第 k 页就要在游标上空走 N 步，
+	// 流水攒到 2 万条时翻到第 300 页要空走 1.5 万条并把它们逐个反序列化
+	// 一遍，翻得越深越慢。cursor 是「上一页最后一条的 key」，Seek 直接跳过去，
+	// 代价与页码无关。
+	//
+	// 两个都不传时从最新一条开始；两个都传时以 cursor 为准（它更精确）。
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	offset := 0
 	if v := strings.TrimSpace(r.URL.Query().Get("offset")); v != "" {
 		n, convErr := strconv.Atoi(v)
@@ -39,6 +48,13 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	if cursor != "" {
+		if err := validCursor(cursor); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_cursor", err.Error())
+			return
+		}
+	}
+
 	// kind 让调用方按类型取（只看注销、只看上游异常）。
 	// 之前只能把流水全拉下来自己过滤，而流水本身是有截断的：
 	// 「只看注销」在末尾几条里找不到时，界面上就是一片空白，
@@ -52,7 +68,7 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 
 	// 多要一条用来判断「后面还有没有」：这样不必为了算总数把整条流水
 	// 反序列化一遍（那是每 60 秒一次的轮询接口）。
-	raws, err := s.svc.Store().PageChanges(limit+1, offset, func(raw []byte) (bool, error) {
+	raws, nextKeys, err := s.svc.Store().PageChangesFrom(cursor, limit+1, offset, func(raw []byte) (bool, error) {
 		var c watch.Change
 		if json.Unmarshal(raw, &c) != nil {
 			return false, nil
@@ -74,7 +90,13 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hasMore := len(raws) > limit
+	// 游标要落在「本页最后一条已返回的记录」上，不能落在多要的那一条探针上：
+	// 游标指的是「下一页从这里之后开始」，取探针会让下一页把它自己丢掉。
+	next := ""
 	if hasMore {
+		if limit > 0 && len(nextKeys) >= limit {
+			next = nextKeys[limit-1]
+		}
 		raws = raws[:limit]
 	}
 	out := make([]watch.Change, 0, len(raws))
@@ -89,10 +111,33 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	}
 	// total 仍然是「本次返回的条数」，保持老调用方不用改；
 	// 翻页信息放在 offset / limit / has_more 三个字段里。
+	// next_cursor 是本页最后一条的游标。has_more 为真时把它原样带回来即可
+	// 取下一页，不必知道「第几页」。
+	//
+	// 没有更多时回空串：给一个指向最后一条的游标，会让调用方再请求一次空页。
 	writeOK(w, map[string]any{
 		"total": len(out), "items": out,
 		"offset": offset, "limit": limit, "has_more": hasMore,
+		"next_cursor": next,
 	})
+}
+
+// validCursor 校验翻页游标。
+//
+// 游标是内部 key（「定宽时间戳-域名」），会被原样 Seek 回 bucket。
+// 不校验的话，一个上兆字节的参数就能让服务端白白 memcmp 一遍；
+// 而控制字符会破坏 key 的字典序前提——虽然结果只是「翻不到东西」，
+// 但那种静默错乱比明确报错难查得多。
+func validCursor(c string) error {
+	if len(c) > 300 {
+		return fmt.Errorf("cursor 过长（%d 字节），上限 300", len(c))
+	}
+	for i := 0; i < len(c); i++ {
+		if c[i] < 0x20 || c[i] == 0x7f {
+			return fmt.Errorf("cursor 含非法字符")
+		}
+	}
+	return nil
 }
 
 // knownKind 是变更事件的合法类型，与 watch / notify 的常量保持一致。

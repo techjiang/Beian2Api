@@ -792,3 +792,114 @@ func TestAppendHistorySameKeyDoesNotInflateCount(t *testing.T) {
 		t.Fatalf("同一时刻同一内容重复写入应互相覆盖，实际 %d 条", len(hist))
 	}
 }
+
+// keyset 翻页：cursor 指向上一页最后一条，下一页从它之后继续。
+//
+// 这是 offset 翻页的替代品。offset 是「走 N 步再开始收」，翻到第 k 页
+// 要在游标上空走 N 步；cursor 直接 Seek 过去。代价与页码无关这件事
+// 没法在单测里测时间，但「一条不重、一条不漏」是可以钉死的。
+func TestPageChangesAfterCursor(t *testing.T) {
+	s := open(t)
+	const n = 25
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("%020d-d%d.com", 1700000000+i, i)
+		if err := s.AppendChange(key, map[string]any{"at": 1700000000 + i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := 0
+	cursor := ""
+	for page := 0; ; page++ {
+		rows, keys, err := s.PageChangesAfter(cursor, 10, func(raw []byte) (bool, error) {
+			return true, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		// 每页的 keys 必须和 rows 一一对应：调用方只拿最后一个推游标。
+		if len(keys) != len(rows) {
+			t.Fatalf("keys 与 rows 不匹配：%d vs %d", len(keys), len(rows))
+		}
+		var v struct {
+			At int64 `json:"at"`
+		}
+		for _, raw := range rows {
+			if err := json.Unmarshal(raw, &v); err != nil {
+				t.Fatal(err)
+			}
+			// 期望倒序：第一条是 1700000024，往后递减，且不重复。
+			if want := int64(1700000000 + n - 1 - seen); v.At != want {
+				t.Fatalf("第 %d 条应是 %d，实际 %d", seen, want, v.At)
+			}
+			seen++
+		}
+		cursor = keys[len(keys)-1]
+		if page > n {
+			t.Fatal("翻页没有终止，游标没有前进")
+		}
+	}
+	if seen != n {
+		t.Fatalf("应恰好翻出 %d 条，实际 %d", n, seen)
+	}
+}
+
+// 游标比库里所有记录都新时（记录被裁或字段写错），要退回到最新一条开始，
+// 而不是回空页——空页会被读成「流水空了」，而库里明明还有几千条。
+func TestPageChangesAfterCursorBeyondNewest(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 5; i++ {
+		_ = s.AppendChange(fmt.Sprintf("%020d-a%d.com", 1700000000+i, i), map[string]any{"at": 1700000000 + i})
+	}
+	rows, _, err := s.PageChangesAfter("99999999999999999999-x.com", 10, func([]byte) (bool, error) {
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("游标越界时应从最新一条开始返回全部 5 条，实际 %d", len(rows))
+	}
+}
+
+// 反过来：游标比库里最旧的那条还旧，说明「它之后」确实什么都没有。
+// 这时候返回空页是对的——不能为了「别回空」而回绕到最新一条，
+// 那会让调用方在同一份数据上无限翻下去。
+func TestPageChangesAfterCursorOlderThanOldest(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 5; i++ {
+		_ = s.AppendChange(fmt.Sprintf("%020d-a%d.com", 1700000000+i, i), map[string]any{"at": 1700000000 + i})
+	}
+	rows, _, err := s.PageChangesAfter("00000000000000000001-gone.com", 10, func([]byte) (bool, error) {
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("游标比所有记录都旧时应返回空页，实际 %d 条", len(rows))
+	}
+}
+
+// offset 与 cursor 同时给时以 cursor 为准：两种定位方式叠加没有语义。
+func TestPageChangesFromPrefersCursor(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 6; i++ {
+		_ = s.AppendChange(fmt.Sprintf("%020d-a%d.com", 1700000000+i, i), map[string]any{"at": 1700000000 + i})
+	}
+	// 先取前两条，拿到游标。
+	_, keys, err := s.PageChangesAfter("", 2, func([]byte) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := s.PageChangesFrom(keys[len(keys)-1], 10, 99, func([]byte) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 剩下的 4 条全在（offset=99 被忽略；若生效就会返回空）。
+	if len(rows) != 4 {
+		t.Fatalf("cursor 生效时应返回剩下 4 条，实际 %d", len(rows))
+	}
+}

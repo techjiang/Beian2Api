@@ -272,8 +272,12 @@ func TestFrontendVerifySendsDomain(t *testing.T) {
 // 点四次「加载更早的」就是 limit=210 → 400 → 整个变更列表被换成一个错误框，
 // 而下方明明还有一大截流水翻不到。
 //
-// 这条测试盯的是「前端请求里的 limit 必须被夹在上限内，且超过上限的部分
-// 改用 offset 往后翻」。两个数字一旦有一边改了，这里会立刻失败。
+// 这条测试盯的是「前端请求里的 limit 必须被夹在上限内，往后翻用游标」。
+// 两个数字一旦有一边改了，这里会立刻失败。
+//
+// 翻页游标从 offset 换成了 cursor：offset 是「走 N 步再开始收」，
+// 服务端每翻一页都要把前面所有记录空走一遍并逐条反序列化，流水一多就越点
+// 越慢。cursor 是上一页最后一条的 key，Seek 直接跳过去，代价与页码无关。
 func TestFrontendChangesPagerRespectsLimitCap(t *testing.T) {
 	src := string(mustAsset(t, "app.js"))
 	// 这里要剥注释、**保留字符串字面量**：URL 拼接本身就在字符串里。
@@ -286,9 +290,12 @@ func TestFrontendChangesPagerRespectsLimitCap(t *testing.T) {
 	if regexp.MustCompile(`/api/v1/changes\?limit=' \+ (cWant|cItems\.length)`).MatchString(code) {
 		t.Fatal("limit 不能直接拼累积计数，那样翻页会撞上服务端上限")
 	}
-	// 每页固定一页的量，翻页靠 offset。
-	if !strings.Contains(code, "'&offset=' + offset") {
-		t.Fatal("往后翻页要用 offset，不能靠把 limit 越堆越大")
+	// 每页固定一页的量，翻页靠服务端给的 next_cursor。
+	if !strings.Contains(code, "'&cursor=' + encodeURIComponent(cCursor || '')") {
+		t.Fatal("往后翻页要用 next_cursor，不能靠把 limit 越堆越大")
+	}
+	if !strings.Contains(code, "cCursor = d.next_cursor") {
+		t.Fatal("游标必须来自响应里的 next_cursor")
 	}
 	// limit 必须被夹在 CHG_MAX 以内（刷新时按已加载条数重取，可能超上限）。
 	if !strings.Contains(code, "Math.min(cItems.length, CHG_MAX)") {

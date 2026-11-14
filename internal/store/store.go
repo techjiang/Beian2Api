@@ -968,10 +968,6 @@ func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error
 
 // PageChanges 在 ListChanges 之上加一层「跳过前 offset 条」的能力，并返回本页内容。
 //
-// 首页的「最近变更」原来是死的：只显示最近 10 条，没有任何翻页或筛选入口。
-// 变更流水攒到几百条之后，第 11 条以前的事实在界面上彻底不可见，只能自己
-// curl。滚动记录的意义就是能往前翻，翻不动等于没有。
-//
 // offset 数的是「已被 fn 判定保留的记录」，所以它和 ?since= 各管一段：
 // since 是增量游标（读到早于游标的记录就整体结束遍历），offset 是翻页游标。
 //
@@ -979,23 +975,84 @@ func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error
 // 不负责收集。让 fn 顺手 append 会掉进一个很隐蔽的坑——跳过发生在
 // fn 之后，被跳过的记录其实已经进过一次结果集了，翻页会翻出重复的内容。
 func (s *Store) PageChanges(limit, offset int, fn func(raw []byte) (keep bool, err error)) ([][]byte, error) {
-	if limit <= 0 {
-		limit = 50
-	}
 	if offset < 0 {
 		offset = 0
 	}
+	rows, _, err := s.scanChanges("", limit, offset, fn)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// PageChangesAfter 从 cursor 之后（更旧的一侧）继续取一页，返回本页内容与下一页的游标。
+//
+// 为什么要有这个：offset 是「走 N 步再开始收」，翻到第 k 页就要在游标上
+// 空走 N 步。流水攒到 2 万条、每页 50 条时，翻到第 300 页要空走 1.5 万条并
+// 把它们逐个反序列化一遍——翻得越深越慢，翻到最后一页最慢。
+//
+// keyset（游标）翻页的代价与页码无关：cursor.Seek 直接跳到那个 key，
+// 之后只读本页的 limit 条。代价是不能「跳到第 N 页」，但翻页界面本来
+// 就只需要「往后一页」。
+//
+// cursor 是上一页最后一条的 key（由本函数返回，对调用方不透明）。
+// 它找不到时按「从头开始」处理：保留上限把旧记录裁掉之后，手里那个游标
+// 就指向一条已经不存在的记录了，返回空页会让人以为流水空了。
+func (s *Store) PageChangesAfter(cursor string, limit int, fn func(raw []byte) (keep bool, err error)) ([][]byte, []string, error) {
+	return s.scanChanges(cursor, limit, 0, fn)
+}
+
+// PageChangesFrom 同时接受 cursor 与 offset：老调用方传 offset，新调用方传 cursor。
+//
+// 两个都不传等价于「从最新一条开始」；都传时以 cursor 为准，因为它是精确的
+// 位置，而 offset 只是「数过去」。为了兼容没有删掉 offset，但它在有 cursor
+// 时会被忽略——两种定位方式叠在一起没有任何合理语义。
+func (s *Store) PageChangesFrom(cursor string, limit, offset int, fn func(raw []byte) (keep bool, err error)) ([][]byte, []string, error) {
+	if cursor != "" {
+		offset = 0
+	}
+	return s.scanChanges(cursor, limit, offset, fn)
+}
+
+// scanChanges 是实现 PageChanges / PageChangesAfter 的那一趟遍历。
+//
+// 返回的 keys 与 rows 一一对应，是本页每一条的 key；调用方要取下一页时
+// 把最后那一个原样带回来即可。
+// offset 与 cursor 是两种互斥的定位方式，这里同时支持只是为了兼容老调用方。
+func (s *Store) scanChanges(cursor string, limit, offset int, fn func(raw []byte) (keep bool, err error)) ([][]byte, []string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
 	var out [][]byte
+	var keys []string
 	err := s.db.View(func(tx *bolt.Tx) error {
-		c := tx.Bucket(bucketChanges).Cursor()
+		b := tx.Bucket(bucketChanges)
+		c := b.Cursor()
+		var k, v []byte
+		if cursor == "" {
+			k, v = c.Last()
+		} else {
+			// 定位到游标之后（更旧的一侧）。
+			//
+			// key 是「定宽时间戳-域名」，字典序即时间序，所以 Seek 得到的是
+			// 「第一个 >= 游标的 key」——要么就是游标本身，要么是比它新的一条。
+			// 两种情况都再 Prev 一步：前者跳过自己（上一页已经给过了），
+			// 后者落到比游标更旧的那一条，正是下一页的起点。
+			//
+			// 游标找不到也有正确的行为：它可能已经被保留上限裁掉了，
+			// 这时返回「从头开始」会比返回空页好——翻出来的是当前还留着的
+			// 那部分，而不是一句「没有更多了」。
+			k, v = c.Seek([]byte(cursor))
+			k, v = c.Prev()
+		}
 		skipped := 0
-		for k, v := c.Last(); k != nil; k, v = c.Prev() {
-			keep, err := fn(v)
-			if errors.Is(err, ErrStop) {
+		for ; k != nil; k, v = c.Prev() {
+			keep, ferr := fn(v)
+			if errors.Is(ferr, ErrStop) {
 				return nil
 			}
-			if err != nil {
-				return err
+			if ferr != nil {
+				return ferr
 			}
 			if !keep {
 				continue
@@ -1005,13 +1062,17 @@ func (s *Store) PageChanges(limit, offset int, fn func(raw []byte) (keep bool, e
 				continue
 			}
 			out = append(out, append([]byte(nil), v...))
+			keys = append(keys, string(k))
 			if len(out) >= limit {
 				return nil
 			}
 		}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, keys, nil
 }
 
 // PutNotifyState 保存某个推送通道的最近投递状态。

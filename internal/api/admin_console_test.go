@@ -495,3 +495,103 @@ func stubRecord(domain string, ts int64, icp string) model.Record {
 	r.Normalize()
 	return r
 }
+
+// 删一条不存在的变更流水必须如实回 deleted:false。
+//
+// bbolt 的 Delete 对不存在的 key 返回 nil，把它当成功的话，后台会弹
+// 「已删除」——而那条记录本来就不存在，用户接着去首页看，它当然不在，
+// 于是只能怀疑按钮坏了或者自己记错了时间。
+func TestAdminDeleteMissingChangeReportsFalse(t *testing.T) {
+	_, h := mkServer(t, nil)
+	_, body := adminReq(t, h, http.MethodDelete, "/api/v1/admin/changes?at=1700000000&domain=nope.com", "")
+	if !strings.Contains(body, `"deleted":false`) {
+		t.Fatalf("不存在的记录应回 deleted:false：%s", body)
+	}
+}
+
+// 存在的仍要回 deleted:true，不然就把「没删到」修成了「永远删不掉」。
+func TestAdminDeleteExistingChangeReportsTrue(t *testing.T) {
+	s, h := mkServer(t, nil)
+	_ = s.svc.Store().AppendChange(fmt.Sprintf("%020d-a.com", 100), map[string]any{"domain": "a.com", "at": 100})
+	_, body := adminReq(t, h, http.MethodDelete, "/api/v1/admin/changes?at=100&domain=a.com", "")
+	if !strings.Contains(body, `"deleted":true`) {
+		t.Fatalf("存在的记录应回 deleted:true：%s", body)
+	}
+}
+
+// 批量加监控会为每个域名抓一次上游建基线，串行跑必然撞上 30 秒写超时。
+//
+// 实测 400 个域名跑了 39 秒：库里已经写进去 521 个，浏览器收到的是连接被重置。
+// 用户看到失败、重试、于是又加一遍。这比慢更糟——它给了个错的结论。
+func TestAdminWatchBulkRunsConcurrently(t *testing.T) {
+	s, h := mkServer(t, nil)
+	domains := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		domains = append(domains, fmt.Sprintf("bulk%d.com", i))
+	}
+	body, _ := json.Marshal(map[string]any{"domains": domains})
+	resp, out := adminReq(t, h, http.MethodPost, "/api/v1/admin/watch/bulk", string(body))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("批量加入失败 %d: %s", resp.StatusCode, out)
+	}
+	if n, _ := s.svc.Store().CountWatch(); n != 30 {
+		t.Fatalf("30 个域名都要落库，实际 %d：%s", n, out)
+	}
+}
+
+// 一个合法域名都没有时不能回 200 + ok:null：
+// 脚本会以为这批已经加进去了，而实际一个都没加。
+func TestAdminWatchBulkAllInvalidIsNotSuccess(t *testing.T) {
+	_, h := mkServer(t, nil)
+	resp, body := adminReq(t, h, http.MethodPost, "/api/v1/admin/watch/bulk", `{"domains":["!!!","@@@"]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("全部非法应 400，实际 %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "invalid_domain") {
+		t.Fatalf("要说清是域名不合法：%s", body)
+	}
+}
+
+// 同一秒里点两次「立即备份」，不能静默盖掉前一份。
+//
+// 原来是秒级时间戳 + O_TRUNC：两个请求都回 200、都回同一个路径，
+// 磁盘上只剩一份。备份是最后一道保险，它自己静默丢一份比不备份更糟。
+func TestAdminBackupDoesNotOverwrite(t *testing.T) {
+	s, h := mkServer(t, nil)
+	dir := filepath.Join(s.cfg.DataDir, "backups")
+
+	_, first := adminReq(t, h, http.MethodPost, "/api/v1/admin/backup", "")
+	if !strings.Contains(first, `"ok":true`) {
+		t.Fatalf("第一次备份失败：%s", first)
+	}
+	_, second := adminReq(t, h, http.MethodPost, "/api/v1/admin/backup", "")
+	if !strings.Contains(second, `"ok":true`) {
+		t.Fatalf("第二次备份失败：%s", second)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".db") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("两次备份应留下两个文件，实际 %d", n)
+	}
+
+	// 但显式指定同名文件时必须明确拒绝，不能覆盖已有备份。
+	resp, out := adminReq(t, h, http.MethodPost, "/api/v1/admin/backup?name=keep.db", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("第一次显式命名应成功 %d: %s", resp.StatusCode, out)
+	}
+	resp, out = adminReq(t, h, http.MethodPost, "/api/v1/admin/backup?name=keep.db", "")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("重名应 409，实际 %d: %s", resp.StatusCode, out)
+	}
+	if !strings.Contains(out, "backup_exists") {
+		t.Fatalf("要说明是文件已存在：%s", out)
+	}
+}

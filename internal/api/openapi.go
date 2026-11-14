@@ -172,11 +172,15 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 			"/api/v1/changes": map[string]any{"get": map[string]any{
 				"summary": "变更事件流水（新的在前）",
 				"description": "since 是增量游标：早于游标的事件不会被返回，遍历同时早停。" +
-					"offset 是翻页游标，kind 用来只看某一类事件。",
+					"翻页推荐用 cursor：把上一页响应里的 next_cursor 原样传回来即可，" +
+					"服务端直接 Seek 到那个位置，翻到第几页都是同样的代价。" +
+					"offset 仍然可用（向后兼容），但它是「走 N 步再开始收」，翻得越深越慢。" +
+					"kind 用来只看某一类事件。",
 				"tags": []string{"巡检"},
 				"parameters": []map[string]any{
 					q("limit", integer("每页条数，默认 50，最大 200"), false),
-					q("offset", integer("跳过条数"), false),
+					q("cursor", str("翻页游标：上一页响应里的 next_cursor"), false),
+					q("offset", integer("跳过条数（兼容保留，建议改用 cursor）"), false),
 					q("since", integer("Unix 秒，只取此后的记录"), false),
 					q("kind", str("事件类型：changed / revoked / registered / upstream_error / recovered"), false),
 				},

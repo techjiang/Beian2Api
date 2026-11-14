@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,5 +192,72 @@ func TestOverviewIncludesSeries(t *testing.T) {
 	// 24 个点：前端的时间轴就按这个长度画，少一个整条线都会错位。
 	if n := strings.Count(body, `"hour":`); n < 24 {
 		t.Fatalf("series 应有 24 个点，实际 %d：%s", n, body)
+	}
+}
+
+// 变更流水翻页：cursor 一路翻下去不重不漏，且 next_cursor 指向本页最后一条。
+func TestChangesCursorPaging(t *testing.T) {
+	s, h := mkServer(t, nil)
+	const base = int64(1700000000)
+	const n = 23
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("%020d-example.com", base+int64(i))
+		_ = s.svc.Store().AppendChange(key, map[string]any{"domain": "example.com", "at": base + int64(i)})
+	}
+
+	type page struct {
+		Data struct {
+			Items []struct {
+				At int64 `json:"at"`
+			} `json:"items"`
+			HasMore    bool   `json:"has_more"`
+			NextCursor string `json:"next_cursor"`
+		} `json:"data"`
+	}
+	seen := 0
+	cursor := ""
+	for i := 0; i < 10; i++ {
+		path := "/api/v1/changes?limit=5"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		_, body := get(t, h, path, nil)
+		var out page
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatal(err)
+		}
+		for _, it := range out.Data.Items {
+			if want := base + int64(n-1-seen); it.At != want {
+				t.Fatalf("第 %d 条应是 %d，实际 %d（%s）", seen, want, it.At, body)
+			}
+			seen++
+		}
+		if !out.Data.HasMore {
+			// 最后一页：不该再给游标，否则调用方会再请求一次空页。
+			if out.Data.NextCursor != "" {
+				t.Fatalf("没有更多时不该给 next_cursor：%s", body)
+			}
+			break
+		}
+		if out.Data.NextCursor == "" {
+			t.Fatalf("还有更多时必须给 next_cursor：%s", body)
+		}
+		cursor = out.Data.NextCursor
+	}
+	if seen != n {
+		t.Fatalf("应翻出全部 %d 条，实际 %d", n, seen)
+	}
+}
+
+// 游标里的控制字符会让 key 的字典序前提失效。明确拒绝，别静默翻出乱序结果。
+func TestChangesRejectsBadCursor(t *testing.T) {
+	_, h := mkServer(t, nil)
+	resp, body := get(t, h, "/api/v1/changes?cursor=abc%00def", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("含控制字符的游标应 400，实际 %d: %s", resp.StatusCode, body)
+	}
+	resp, body = get(t, h, "/api/v1/changes?cursor="+strings.Repeat("a", 400), nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("过长的游标应 400，实际 %d: %s", resp.StatusCode, body)
 	}
 }

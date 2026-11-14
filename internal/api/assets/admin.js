@@ -576,7 +576,10 @@ function withKey(path) {
   }
 
   /* ---- 变更流水 ---- */
-  var chState = { offset: 0, items: [], kind: '' };
+  /* 翻页用 next_cursor 而不是 offset：offset 是「走 N 步再开始收」，
+     服务端每翻一页都要把前面所有记录空走一遍并逐条反序列化，流水一多
+     就越点越慢。cursor 是上一页最后一条的 key，Seek 直接跳过去。 */
+  var chState = { cursor: '', items: [], kind: '' };
 
   var KIND_WORD = {
     changed: ['变更', ''], revoked: ['注销', 'err'], registered: ['新增', ''],
@@ -584,12 +587,13 @@ function withKey(path) {
   };
 
   function loadChanges(reset) {
-    if (reset) { chState.offset = 0; chState.items = []; }
-    var path = '/api/v1/changes?limit=' + PAGE + '&offset=' + chState.offset +
+    if (reset) { chState.cursor = ''; chState.items = []; }
+    var path = '/api/v1/changes?limit=' + PAGE +
+      (chState.cursor ? '&cursor=' + encodeURIComponent(chState.cursor) : '') +
       (chState.kind ? '&kind=' + encodeURIComponent(chState.kind) : '');
     return api(path).then(function (d) {
       chState.items = chState.items.concat(d.items || []);
-      chState.offset = chState.items.length;
+      chState.cursor = d.next_cursor || '';
       renderChanges(d.has_more);
     }).catch(function (err) { fail($('#ch-list'), err); });
   }

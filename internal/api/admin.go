@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -29,17 +30,48 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := r.URL.Query().Get("name")
+	dir := filepath.Join(s.cfg.DataDir, "backups")
+
+	// 文件名精确到毫秒，且撞名时让路而不是覆盖。
+	//
+	// 之前是秒级时间戳 + O_TRUNC：同一秒里点两次「立即备份」（或者脚本里
+	// 连发两个请求），第二次会静默盖掉第一次写出来的文件——两个请求都回
+	// 200 和同一个路径，磁盘上只剩一份。备份是「最后一道保险」，
+	// 它自己静默丢一份比不备份更让人安心得过分。
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	explicit := name != ""
 	if name == "" {
-		name = "beian2api-" + time.Now().Format("20060102-150405") + ".db"
+		base := "beian2api-" + time.Now().Format("20060102-150405.000")
+		name = base + ".db"
+		for i := 2; ; i++ {
+			if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) {
+				break
+			}
+			name = fmt.Sprintf("%s-%d.db", base, i)
+			if i > 100 {
+				writeErr(w, http.StatusInternalServerError, "backup_failed", "备份目录里同名文件过多，请先清理")
+				return
+			}
+		}
 	}
 	// 只接受纯文件名，防止路径穿越。
 	if strings.ContainsAny(name, `/\`) || strings.HasPrefix(name, ".") {
 		writeErr(w, http.StatusBadRequest, "invalid_name", "name 只能是纯文件名")
 		return
 	}
-	dir := filepath.Join(s.cfg.DataDir, "backups")
 	dst := filepath.Join(dir, name)
+	// 显式指定的文件名撞上已有备份时明确拒绝。
+	//
+	// 用固定名字做「每天一份，覆盖昨天」是个合理用法，但它必须是**说出来的**
+	// 决定，不能由「刚好同名」来替人决定——两次不同的备份变成一份，
+	// 中间那次的内容就永久没了。要覆盖就先删再备，那是两步、看得见。
+	if explicit {
+		if _, err := os.Stat(dst); err == nil {
+			writeErr(w, http.StatusConflict, "backup_exists",
+				"backups 目录里已有同名文件 "+name+"，换一个名字或先删掉它")
+			return
+		}
+	}
 
 	// 在线备份要在一个读事务里把整个数据文件写到磁盘。数据文件几百 MB 时
 	// 这一步必然超过 30 秒的 WriteTimeout，结果是备份成功、响应被掐断，

@@ -560,7 +560,7 @@ function withKey(path) {
         原来这里是 `cWant += 50` 无条件往上堆：点四次就是 limit=210 →
         400 → 整个列表被换成一个错误框，而底下明明还有几百条翻不到。
 
-     所以：每页固定 CHG_PAGE 条，往后翻用 offset，翻到多少条都不会让
+     所以：每页固定 CHG_PAGE 条，往前翻用 next_cursor，翻到多少条都不会让
      limit 变大。CHG_MAX 只是「别自己越过服务端上限」的守门人。 */
   var CHG_FIRST = 10;
   var CHG_PAGE = 50;
@@ -594,27 +594,48 @@ function withKey(path) {
     return out;
   }
 
-  /* loadChanges(extend)：extend 为真时往后翻一页，否则重取开头那一段。 */
+  /* loadChanges(extend)：extend 为真时往后翻一页，否则重取开头那一段。
+
+     往后翻用 next_cursor 而不是 offset。offset 是「走 N 步再开始收」，
+     服务端每翻一页都要在游标上空走一遍前面所有记录并把它们反序列化——
+     流水攒到几千条时，点「加载更早的」会越点越慢。cursor 是上一页最后
+     一条的 key，服务端 Seek 直接跳过去，翻到第几页都是同样的代价。
+
+     cursor 为空就是「从头开始」，所以刷新那一路天然还是对的。 */
+  var cCursor = '';
+
   function loadChanges(extend) {
     if (!cList || cLoading) return;
     cLoading = true;
-    var offset = extend ? cItems.length : 0;
-    // 刷新时按「已加载多少条」重取，让视图保持在同一个位置；
-    // 超过上限就只刷新前 CHG_MAX 条，剩下的靠 merge 原样留住。
-    var limit = extend ? CHG_PAGE
-      : (cItems.length > CHG_FIRST ? Math.min(cItems.length, CHG_MAX) : CHG_FIRST);
-    var q = '/api/v1/changes?limit=' + limit;
-    if (offset > 0) q += '&offset=' + offset;
+    var q = '/api/v1/changes?';
+    if (extend) {
+      q += 'limit=' + CHG_PAGE + '&cursor=' + encodeURIComponent(cCursor || '');
+    } else {
+      // 刷新（从最新一条重取）：条数跟着已加载的量走，让视图停在原处；
+      // 一次拉满会让首屏铺出几百行，把下面所有面板推到很远。
+      var want = cItems.length > CHG_FIRST ? Math.min(cItems.length, CHG_MAX) : CHG_FIRST;
+      q += 'limit=' + want;
+      cCursor = '';
+    }
     if (cKind) q += '&kind=' + encodeURIComponent(cKind);
+    // 用 response 里的 next_cursor 推进游标。
+    //
+    // 刷新那一路是「从最新开始重取一段」，所以它的 next_cursor 指向
+    // 这一段末尾；但本地已经加载到更后面（cItems 更长）时，那个游标就
+    // 太靠前了——下一次「加载更早的」会从中间接上去，中间那段被跳过。
+    // 所以刷新时只在「这一次重取的条数覆盖了已加载的全部」才采信它。
+    var coversAll = !extend && want >= cItems.length;
     api(q).then(function (d) {
       var page = d.items || [];
       if (extend) {
         cItems = mergeChanges(page, cItems, false);
-      } else if (offset === 0 && limit < cItems.length) {
-        // 只刷新了最前面一段：后面的旧记录原样保留。
+      } else if (cItems.length > CHG_FIRST) {
         cItems = mergeChanges(page, cItems, true);
       } else {
         cItems = page;
+      }
+      if (d.next_cursor && (extend || coversAll)) {
+        cCursor = d.next_cursor;
       }
       cHasMore = !!d.has_more;
       renderChanges();
