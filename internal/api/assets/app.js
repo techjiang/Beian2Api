@@ -26,6 +26,59 @@ function setKey(v) {
   }
 }
 
+/* copyText 复制文本，返回 Promise。
+   navigator.clipboard 只在安全上下文（https 或 localhost）里存在。
+   用局域网 IP 打开自己部署的服务时它是 undefined，直接调 .writeText 会抛
+   TypeError——按钮点下去毫无反应，也不报错。所以降级到 execCommand。 */
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(function () {
+      // 权限被拒（非用户手势、iframe、浏览器策略）时再试老办法，
+      // 两条都失败才算真失败。
+      return legacyCopy(text);
+    });
+  }
+  return legacyCopy(text);
+}
+
+function legacyCopy(text) {
+  return new Promise(function (resolve, reject) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    ok ? resolve() : reject(new Error('浏览器不允许自动复制'));
+  });
+}
+
+/* showCopyBox 在 host 里摊出一段已选中的文本，让人手动 Ctrl+C。
+   自动复制失败时只说一句「复制失败」等于把人丢在原地：徽章代码、
+   JSON 都不是屏幕上现成能选的东西，用户没有别的办法拿到它。 */
+function showCopyBox(host, text, label) {
+  var old = host.querySelector('.copy-box');
+  if (old) old.remove();
+  var box = document.createElement('div');
+  box.className = 'copy-box';
+  var tip = document.createElement('div');
+  tip.className = 'copy-tip';
+  tip.textContent = '自动复制被浏览器拦下了，下面是' + (label || '内容') + '，全选后按 Ctrl/⌘+C 复制：';
+  var ta = document.createElement('textarea');
+  ta.readOnly = true;
+  ta.value = text;
+  ta.rows = Math.min(6, text.split('\n').length + 1);
+  box.appendChild(tip);
+  box.appendChild(ta);
+  host.appendChild(box);
+  ta.focus();
+  ta.select();
+}
+
 function withKey(path) {
   var k = b2aKey();
   if (!k) return path;
@@ -80,7 +133,10 @@ function withKey(path) {
       e.preventDefault();
       var v = $('#k').value.trim();
       var stored = setKey(v);
-      $('#keybox').hidden = !!v;
+      // 这里原先无条件 `hidden = !!v`：填了 Key 就把整个框收起来，而下面那句
+      // 「✓ Key 有效」写进的是框里的提示行——框都没了，谁看得见？结果填对了
+      // 和填错了在界面上长得一模一样，都只剩一个不动的搜索框，用户只能靠
+      // 「怎么还是没数据」来猜。现在框留到验证结果出来再收。
       var tip = $('#keytip');
       if (tip) {
         tip.textContent = v
@@ -91,9 +147,18 @@ function withKey(path) {
       // 保存完立刻验一次：Key 填错了跟没填一样，而「保存成功」的提示会让人
       // 以为已经好了，直到下一次刷新才发现还是 401。
       api('/api/v1/stats').then(function () {
-        if (tip) tip.textContent = v ? '✓ Key 有效，已保存到本浏览器。' : '已清除 Key。';
+        var msg = v ? '✓ Key 有效，已保存到本浏览器。' : '已清除 Key。';
+        if (tip) tip.textContent = msg;
         loadStats(); loadWatch(); loadChanges(); loadNotify(); loadProviders();
         if (input.value.trim()) submit();
+        // 先让人看见「✓ 有效」，再收框。停留久一点也没关系：这段时间里
+        // 再点一次保存会因为 tip 文案变了而重新计时，不会错收一个失败的框。
+        // 清空 Key 时反而不收框：清掉之后这实例仍然需要 Key，框得留着。
+        var box = $('#keybox');
+        if (!v) return;
+        setTimeout(function () {
+          if (box && tip && tip.textContent === msg) box.hidden = true;
+        }, 1400);
       }).catch(function (err) {
         if (tip) tip.textContent = '✗ Key 无效：' + err.message;
       });
@@ -163,9 +228,14 @@ function withKey(path) {
     var acts = el('div', 'actions');
     var copy = el('button', 'ghost small', '复制 JSON');
     copy.onclick = function () {
-      navigator.clipboard.writeText(JSON.stringify(d, null, 2)).then(function () {
+      copyText(JSON.stringify(d, null, 2)).then(function () {
         copy.textContent = '已复制 ✓';
         setTimeout(function () { copy.textContent = '复制 JSON'; }, 1600);
+      }).catch(function () {
+        // 复制失败必须给出替代方案：静默失败的话按钮什么都不变，
+        // 用户以为点漏了，反复点。
+        showCopyBox(card, JSON.stringify(d, null, 2), 'JSON');
+        copy.textContent = '手动复制 ↓';
       });
     };
     acts.appendChild(copy);
@@ -178,9 +248,16 @@ function withKey(path) {
       var badge = el('button', 'ghost small', '徽章代码');
       badge.onclick = function () {
         var src = location.origin + '/badge/icp.svg?domain=' + encodeURIComponent(d.domain);
-        navigator.clipboard.writeText('![' + d.domain + ' 备案](' + src + ')');
-        badge.textContent = '已复制 ✓';
-        setTimeout(function () { badge.textContent = '徽章代码'; }, 1600);
+        // 原来这里是「调用完立刻改文案」——无论复制成功与否都显示「已复制 ✓」。
+        // 在 http + 局域网 IP 下 clipboard 根本不存在，异常被丢掉，
+        // 于是用户看到的是一句谎话，粘贴出来是空的。
+        copyText('![' + d.domain + ' 备案](' + src + ')').then(function () {
+          badge.textContent = '已复制 ✓';
+          setTimeout(function () { badge.textContent = '徽章代码'; }, 1600);
+        }).catch(function () {
+          showCopyBox(card, '![' + d.domain + ' 备案](' + src + ')', '徽章代码');
+          badge.textContent = '手动复制 ↓';
+        });
       };
       acts.appendChild(badge);
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -32,7 +33,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			Refresh bool   `json:"refresh"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
-			writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 		domain, refresh = body.Domain, body.Refresh
@@ -62,7 +63,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			Refresh bool     `json:"refresh"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
-			writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 		domains, refresh = body.Domains, body.Refresh
@@ -167,7 +168,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			Domain string `json:"domain"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
-			writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 		d := model.NormalizeDomain(body.Domain)
@@ -421,10 +422,25 @@ func (s *Server) writeServiceErr(w http.ResponseWriter, err error) {
 	}
 }
 
+// maxBodyBytes 是单个请求体的上限。
+const maxBodyBytes = 1 << 20
+
+// decodeJSON 解析 JSON 请求体。
+//
+// 「超过上限」和「不是 JSON」必须分开报：两者都以 400 返回，但一个超了
+// 1MB 的合法 JSON 会被这句笼统的「请求体不是合法 JSON」挡下来，用户只会
+// 反复检查自己的 JSON 有没有写错——而它一点错都没有，就是太长了。
 func decodeJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
-	return dec.Decode(v)
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
+	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return fmt.Errorf("请求体超过 %d KB 上限", maxBodyBytes>>10)
+		}
+		return errors.New("请求体不是合法 JSON")
+	}
+	return nil
 }
 
 // parseLimit 解析 limit 参数。

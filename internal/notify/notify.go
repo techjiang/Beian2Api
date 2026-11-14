@@ -325,7 +325,11 @@ func (d *Dispatcher) once(ctx context.Context, ch Channel, ev Event) error {
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return err
+		// 报错里带的是整条请求 URL，而机器人地址本身就是凭据：
+		// 钉钉的 access_token、飞书的 hook id 全在里面。
+		// 这段文本会进投递状态、落到 notify bucket、显示在首页，
+		// 未开鉴权的部署等于把「往你群里发消息」的能力挂在公网上。
+		return errors.New(redactURL(err.Error(), target))
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
@@ -341,6 +345,26 @@ func (d *Dispatcher) once(ctx context.Context, ch Channel, ev Event) error {
 		return err
 	}
 	return nil
+}
+
+// redactURL 把错误文本里出现的完整请求地址换成只保留主机名。
+//
+// 只抹掉地址本身、保留主机：主机对排查有用（连不上还是走错了域名），
+// 而 query 里的 token 一旦泄露就等同于把机器人交出去。
+func redactURL(msg, rawURL string) string {
+	if rawURL == "" {
+		return msg
+	}
+	masked := rawURL
+	if i := strings.IndexByte(masked, '?'); i >= 0 {
+		masked = masked[:i] + "?<已隐藏>"
+	}
+	msg = strings.ReplaceAll(msg, rawURL, masked)
+	// 飞书的 hook 把 id 放在路径里，顺带把路径段也隐掉。
+	if u, err := url.Parse(rawURL); err == nil && u.Path != "" && u.Path != "/" {
+		msg = strings.ReplaceAll(msg, u.Path, "/<已隐藏>")
+	}
+	return msg
 }
 
 // checkSemantic 判断 IM 是否在 200 响应里报告了错误。

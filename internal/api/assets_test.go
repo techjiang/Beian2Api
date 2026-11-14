@@ -131,6 +131,19 @@ func TestFrontendHasNoDuplicateDeclarations(t *testing.T) {
 	}
 }
 
+// stripLineComments 只去掉整行注释，保留字符串字面量与缩进结构。
+func stripLineComments(src string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func mustAsset(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := assets.ReadFile("assets/" + name)
@@ -138,4 +151,80 @@ func mustAsset(t *testing.T, name string) []byte {
 		t.Fatalf("读取内嵌资源 %s: %v", name, err)
 	}
 	return b
+}
+
+// 复制必须走一个带降级的统一入口。
+//
+// navigator.clipboard 只在安全上下文（https / localhost）里存在。用局域网 IP
+// 打开自己部署的服务时它是 undefined，直接调 .writeText 抛 TypeError——
+// 按钮点下去毫无反应，也不报错（异常发生在 Promise 之外）。
+// 徽章那段更糟：调用完就无条件写「已复制 ✓」，粘贴出来是空的。
+func TestFrontendCopyHasFallback(t *testing.T) {
+	src := string(mustAsset(t, "app.js"))
+	if !strings.Contains(src, "function copyText(") {
+		t.Fatal("app.js 要有统一的 copyText 入口")
+	}
+	if !strings.Contains(src, "navigator.clipboard && navigator.clipboard.writeText") {
+		t.Fatal("copyText 必须先判断 clipboard 是否存在，不能直接调")
+	}
+	if !strings.Contains(src, "document.execCommand('copy')") {
+		t.Fatal("不安全上下文里要降级到 execCommand")
+	}
+	// 除了 copyText 内部，其它地方不许再直接碰 navigator.clipboard。
+	code := stripCommentsAndStrings(src)
+	start := strings.Index(code, "function copyText(")
+	end := strings.Index(code[start:], "\nfunction withKey(")
+	if start < 0 || end < 0 {
+		t.Fatal("找不到 copyText 的函数体边界")
+	}
+	inside := code[start : start+end]
+	if strings.Count(code, "navigator.clipboard") != strings.Count(inside, "navigator.clipboard") {
+		t.Fatal("navigator.clipboard 只允许出现在 copyText 里")
+	}
+	// 徽章的「已复制 ✓」只能在复制成功之后出现。
+	i := strings.Index(src, "copyText('!['")
+	if i < 0 {
+		t.Fatal("徽章代码必须用 copyText 复制")
+	}
+	if j := strings.Index(src[i:], "已复制"); j < 0 {
+		t.Fatal("徽章仍要给出复制成功提示")
+	}
+	if strings.Contains(src[i:i+400], "已复制 ✓');\n        setTimeout") {
+		t.Fatal("徽章不能无条件写「已复制」")
+	}
+}
+
+// 保存 Key 后不能立刻收框。
+//
+// 「✓ Key 有效」这句提示写在 keybox 里。之前提交处理的第一行就是
+// `$('#keybox').hidden = !!v`——填了 Key 就收框，提示写进一个已经不可见的
+// 元素里。填对和填错在界面上完全一样（都只剩一个不动的搜索框），用户只能靠
+// 「怎么还是没数据」自己猜。框必须留到验证结果回来之后才收。
+func TestFrontendKeyBoxStaysUntilVerified(t *testing.T) {
+	src := string(mustAsset(t, "app.js"))
+	// 这里不能用 stripCommentsAndStrings：选择器 `'#keybox'` 本身就是字符串字面量，
+	// 剥掉之后一个字都匹配不上。改为剥掉注释、保留字符串。
+	code := stripLineComments(src)
+	start := strings.Index(code, "var kform")
+	if start < 0 {
+		t.Fatal("找不到保存 Key 的提交处理")
+	}
+	end := strings.Index(code[start:], "function refreshRSS(")
+	if end < 0 {
+		t.Fatal("找不到提交处理的结束位置")
+	}
+	body := code[start : start+end]
+	verify := strings.Index(body, "api('/api/v1/stats')")
+	if verify < 0 {
+		t.Fatal("保存后必须立刻验一次 Key")
+	}
+	// 校验之前不许动 hidden。
+	before := body[:verify]
+	if strings.Contains(before, "#keybox") && strings.Contains(before, "hidden") {
+		t.Fatal("校验结果回来之前不能收起 keybox，否则「✓ 有效」这句谁也看不到")
+	}
+	after := body[verify:]
+	if !strings.Contains(after, "#keybox") || !strings.Contains(after, "hidden = true") {
+		t.Fatal("验证通过之后才收起 keybox")
+	}
 }

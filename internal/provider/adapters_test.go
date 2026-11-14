@@ -321,3 +321,27 @@ func TestAPIHZDefaultCredentialUnchanged(t *testing.T) {
 		t.Fatalf("默认凭据不该变: %q %q", p.ID, p.Key)
 	}
 }
+
+// 上游凭据不能出现在错误信息里。
+//
+// http.Client 的报错是 `Get "https://...icp.php?id=xxx&key=yyy": dial tcp ...`，
+// 整段 URL 带着凭据。这条错误会一路进到 API 的错误响应、巡检条目的
+// last_error、以及推到钉钉/飞书群里的告警正文——等于把凭据公开广播。
+func TestAPIHZRedactsCredentialInErrors(t *testing.T) {
+	a := NewAPIHZ(Options{Timeout: time.Second})
+	a.URL = "http://127.0.0.1:1/api/icp.php"
+	a.WithCredential("my-secret-id-1234", "my-secret-key-5678")
+	_, err := a.Lookup(context.Background(), "example.com")
+	if err == nil {
+		t.Fatal("连不上时应报错")
+	}
+	msg := err.Error()
+	for _, secret := range []string{"my-secret-id-1234", "my-secret-key-5678"} {
+		if strings.Contains(msg, secret) {
+			t.Fatalf("凭据 %q 出现在错误信息里: %s", secret, msg)
+		}
+	}
+	if !strings.Contains(msg, "example.com") {
+		t.Fatalf("不含凭据的部分该保留（能看出是哪个域名查失败），实际: %s", msg)
+	}
+}

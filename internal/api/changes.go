@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asoe/beian2api/internal/store"
 	"github.com/asoe/beian2api/internal/watch"
 )
 
@@ -36,7 +37,11 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			return false, nil
 		}
 		if since > 0 && c.At < since {
-			return false, nil
+			// 变更流水的 key 是「时间戳-域名」，遍历本身是新的在前：
+			// 读到第一条早于游标的记录，后面全是更旧的，没必要再扫。
+			// 增量同步（最常见的用法）本来就是「拉最近几条」，
+			// 没有早停的话每次都要把整个流水反序列化一遍。
+			return false, store.ErrStop
 		}
 		out = append(out, c)
 		return true, nil

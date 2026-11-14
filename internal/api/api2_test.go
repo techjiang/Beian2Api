@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -715,6 +716,57 @@ func TestWatchStatusRejectsBadOffset(t *testing.T) {
 		resp, body := get(t, h, "/api/v1/watch/status?offset="+bad, nil)
 		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "invalid_offset") {
 			t.Fatalf("offset=%s 应 400，实际 %d: %s", bad, resp.StatusCode, body)
+		}
+	}
+}
+
+// 请求体超过 1MB 时不能报「不是合法 JSON」。
+//
+// 两者都是 400，但一个超长的合法 JSON 被这句话挡下来，用户会反复检查
+// 自己的 JSON 有没有写错——它一点错都没有，就是太长了。
+func TestOversizeBodyReportsSizeNotSyntax(t *testing.T) {
+	_, h := mkServer(t, nil)
+	big := `{"domains":["` + strings.Repeat("a", 2<<20) + `.com"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/batch", strings.NewReader(big))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	body := w.Body.String()
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("应返回 400，实际 %d: %s", w.Code, body)
+	}
+	if !strings.Contains(body, "上限") {
+		t.Fatalf("应说明是超过上限而不是语法错误，实际 %s", body)
+	}
+}
+
+// since 增量拉取要能早停：变更流水的 key 是「时间戳-域名」，
+// 读到第一条更旧的就说明后面全是更旧的，继续扫只是白读。
+func TestChangesSinceStopsAtFirstOlderEvent(t *testing.T) {
+	s, h := mkServer(t, nil)
+	const base = int64(1700000000)
+	for i := 0; i < 30; i++ {
+		key := fmt.Sprintf("%020d-example.com", base+int64(i))
+		_ = s.svc.Store().AppendChange(key, map[string]any{"domain": "example.com", "at": base + int64(i)})
+	}
+	_, body := get(t, h, "/api/v1/changes?since="+strconv.FormatInt(base+25, 10), nil)
+	var out struct {
+		Data struct {
+			Total int `json:"total"`
+			Items []struct {
+				At int64 `json:"at"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Total != 5 {
+		t.Fatalf("since 之后应有 5 条，实际 %d: %s", out.Data.Total, body)
+	}
+	for _, it := range out.Data.Items {
+		if it.At < base+25 {
+			t.Fatalf("返回了早于 since 的事件: %+v", it)
 		}
 	}
 }

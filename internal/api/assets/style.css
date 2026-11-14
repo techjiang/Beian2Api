@@ -202,6 +202,20 @@ footer.foot .sp { margin-left: auto; }
 }
 @keyframes fade { from { transform: translateY(6px); } to { transform: none; } }
 
+/* 自动复制失败时摊出来的手动复制框。 */
+.copy-box {
+  margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+  background: var(--bg); border: 1px dashed var(--line);
+}
+.copy-box .copy-tip { font-size: 12px; color: var(--fg-mute); margin-bottom: 6px; }
+.copy-box textarea {
+  width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--fg); background: var(--bg-soft); border: 1px solid var(--line);
+  border-radius: 8px; resize: vertical; outline: none;
+}
+.copy-box textarea:focus { border-color: var(--brand); }
+
 /* 巡检面板 */
 .panel { padding: 14px 16px; }
 .panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }

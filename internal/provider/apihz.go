@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/asoe/beian2api/internal/model"
 )
@@ -44,6 +45,19 @@ func (a *APIHZ) WithCredential(id, key string) *APIHZ {
 // Name 返回适配器名。
 func (a *APIHZ) Name() string { return "apihz" }
 
+// redact 把错误文本里的凭据值替换成 ***。
+//
+// 只抹 id / key 的值而不是整段 URL：剩下的域名部分是有用的，
+// 「哪个域名查失败」和「凭据是什么」该保住的是前者。
+func (a *APIHZ) redact(s string) string {
+	for _, v := range []string{a.ID, a.Key} {
+		if len(v) >= 4 {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+	}
+	return s
+}
+
 // Lookup 查询单个域名。
 func (a *APIHZ) Lookup(ctx context.Context, domain string) ([]model.Record, error) {
 	u := buildURL(a.URL, map[string]string{
@@ -58,7 +72,11 @@ func (a *APIHZ) Lookup(ctx context.Context, domain string) ([]model.Record, erro
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUpstream, err)
+		// 凭据在 query 里，而 http.Client 的报错会把整个 URL 打出来：
+		// `Get "https://.../icp.php?id=xxx&key=yyy": dial tcp ...`。
+		// 这条错误会一路进到 API 的错误响应、巡检的 last_error、
+		// 以及推到钉钉/飞书群里的告警正文——等于把你的凭据公开广播。
+		return nil, fmt.Errorf("%w: %s", ErrUpstream, a.redact(err.Error()))
 	}
 	defer func() { io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)); resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

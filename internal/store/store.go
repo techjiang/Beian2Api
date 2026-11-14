@@ -377,6 +377,29 @@ func (s *Store) PutWatch(w *WatchItem) error {
 	})
 }
 
+// UpdateWatchIfExists 只在监控项仍然存在时覆盖它，返回是否真的写入了。
+//
+// 巡检一轮可能跑几十秒（域名多时按估算窗口能到十几分钟），这段时间里用户
+// 完全可以点「移出」。巡检结束时若无条件 PutWatch，刚被移出的域名会原地复活：
+// 界面上它又回来了，再点一次「移出」，下一轮巡检再写回来——像个删不掉的幽灵。
+// 写入方是巡检、删除方是用户，用户的意思优先。
+func (s *Store) UpdateWatchIfExists(w *WatchItem) (bool, error) {
+	b, err := json.Marshal(w)
+	if err != nil {
+		return false, err
+	}
+	written := false
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		bk := tx.Bucket(bucketWatch)
+		if bk.Get([]byte(w.Domain)) == nil {
+			return nil
+		}
+		written = true
+		return bk.Put([]byte(w.Domain), b)
+	})
+	return written, err
+}
+
 // GetWatch 获取监控项。
 func (s *Store) GetWatch(domain string) (*WatchItem, error) {
 	var w WatchItem
@@ -844,10 +867,19 @@ func (s *Store) AppendChange(id string, v any) error {
 	})
 }
 
+// ErrStop 由 ListChanges 的回调返回，表示「不必再往前遍历了」。
+//
+// 增量拉取需要一个早停信号：key 是「时间戳-域名」，遍历天然是新的在前，
+// 一旦读到早于游标的那条，后面全部更旧，继续扫只是白读。没有它的话
+// `?since=<刚刚>` 这种最常见的增量请求，每次都要把整个变更流水反序列化一遍。
+var ErrStop = errors.New("stop iteration")
+
 // ListChanges 按时间倒序（新的在前）遍历变更事件，最多保留 limit 条。
 //
 // fn 返回 keep=false 时该条被丢弃，且不占用 limit 名额。过滤必须发生在
 // 截断之前，否则「since 增量拉取」会先被 limit 截断，中间的事件就漏了。
+//
+// fn 返回 ErrStop 时立即结束遍历且不算错误。
 func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error)) error {
 	if limit <= 0 {
 		limit = 50
@@ -857,6 +889,9 @@ func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error
 		n := 0
 		for k, v := c.Last(); k != nil; k, v = c.Prev() {
 			keep, err := fn(v)
+			if errors.Is(err, ErrStop) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}

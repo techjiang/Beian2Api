@@ -254,7 +254,7 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_WEBHOOK` | 空 | 变更推送地址（单通道，等价于一个 generic 通道） |
 | `BEIAN2API_NOTIFY_CHANNELS` | 空 | 多通道推送，形如 `dingtalk:<url>,wecom:<url>` |
 | `BEIAN2API_WATCH_INTERVAL` | `86400` | 巡检间隔，支持 `30m` / `6h` / 秒数 |
-| `BEIAN2API_WATCH_ENABLED` | `true` | 是否启用自动巡检 |
+| `BEIAN2API_WATCH_ENABLED` | `true` | 是否启用自动巡检，接受 `1/true/yes/on` 与 `0/false/no/off` |
 | `BEIAN2API_WATCH_FAIL_THRESHOLD` | `3` | 连续几轮查不到才推送「上游异常」 |
 | `BEIAN2API_TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` / `X-Real-IP` |
 | `BEIAN2API_RETAIN_CHANGES` | `2000` | 变更流水保留条数，0 表示不裁剪 |

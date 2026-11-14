@@ -22,12 +22,20 @@ import (
 )
 
 type stub struct {
-	recs []model.Record
-	err  error
+	recs  []model.Record
+	err   error
+	delay time.Duration
 }
 
 func (s *stub) Name() string { return "stub" }
 func (s *stub) Lookup(ctx context.Context, d string) ([]model.Record, error) {
+	if s.delay > 0 {
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return s.recs, s.err
 }
 
@@ -591,5 +599,47 @@ func TestStatusPageTotals(t *testing.T) {
 	}
 	if w.Total() != 3 {
 		t.Fatalf("Total() 应只数个数，实际 %d", w.Total())
+	}
+}
+
+// 巡检一轮可能跑几十秒（域名多时几分钟）。这段时间里用户点「移出」，
+// 巡检结束时若无条件写回，那个域名就原地复活——界面上又出现了，
+// 再点「移出」，下一轮再写回来。用户的删除意图必须优先于定时任务。
+func TestRemovedDuringRunStaysRemoved(t *testing.T) {
+	w, st, sb := setup(t)
+	if err := st.PutWatch(&store.WatchItem{Domain: "example.com", AddedAt: model.Now(), LastFP: "stale"}); err != nil {
+		t.Fatal(err)
+	}
+	sb.delay = 60 * time.Millisecond
+	sb.recs = []model.Record{normalize("京ICP备2号-1", "示例公司")}
+
+	done := make(chan struct{})
+	go func() {
+		// 巡检查到一半，用户在网页上点了「移出」。
+		time.Sleep(20 * time.Millisecond)
+		if err := st.DeleteWatch("example.com"); err != nil {
+			t.Error(err)
+		}
+		close(done)
+	}()
+	w.RunOnce(context.Background())
+	<-done
+
+	if it, err := st.GetWatch("example.com"); err == nil {
+		t.Fatalf("巡检把已被移出的域名写回来了: %+v", it)
+	}
+}
+
+// 「加入监控」写入的是新基线，巡检更新的是已有条目——两种语义不能混用。
+func TestUpsertWatchStillCreates(t *testing.T) {
+	w, st, _ := setup(t)
+	if err := st.PutWatch(&store.WatchItem{Domain: "example.com", AddedAt: model.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("首轮只建基线，不应有变更，实际 %d 条", len(ch))
+	}
+	if it, err := st.GetWatch("example.com"); err != nil || it.LastFP == "" {
+		t.Fatalf("巡检应把基线写进已有条目: %+v err=%v", it, err)
 	}
 }

@@ -207,3 +207,34 @@ func TestOnlyGenericAcceptsEmptyBody(t *testing.T) {
 		}
 	}
 }
+
+// 机器人地址本身就是凭据（钉钉 access_token、飞书 hook id）。
+// 连接失败时 http.Client 的报错会把整条 URL 打出来，这条文本会进
+// 投递状态、落盘、显示在首页「推送失败」那一行——不抹掉等于广播凭据。
+func TestDeliveryErrorRedactsWebhookURL(t *testing.T) {
+	d := New([]Channel{{Name: "群", Kind: KindDingTalk,
+		URL: "http://127.0.0.1:1/robot/send?access_token=SUPER_SECRET_TOKEN"}}, testLogger()).
+		WithRetries(1, time.Millisecond)
+	rs := d.Send(context.Background(), Event{Kind: EventChanged, Domain: "example.com"})
+	if len(rs) != 1 || rs[0].OK {
+		t.Fatalf("应投递失败，实际 %+v", rs)
+	}
+	if strings.Contains(rs[0].Error, "SUPER_SECRET_TOKEN") {
+		t.Fatalf("token 出现在错误信息里: %s", rs[0].Error)
+	}
+	// 主机名要留着：那是排查「连不上还是配错了地址」的唯一线索。
+	if !strings.Contains(rs[0].Error, "127.0.0.1:1") {
+		t.Fatalf("主机名该保留，实际: %s", rs[0].Error)
+	}
+}
+
+func TestRedactURLKeepsHost(t *testing.T) {
+	msg := `Post "https://open.feishu.cn/open-apis/bot/v2/hook/abcdef-123?x=1": timeout`
+	got := redactURL(msg, "https://open.feishu.cn/open-apis/bot/v2/hook/abcdef-123?x=1")
+	if strings.Contains(got, "abcdef-123") {
+		t.Fatalf("飞书 hook id 泄露: %s", got)
+	}
+	if !strings.Contains(got, "open.feishu.cn") {
+		t.Fatalf("主机名该保留: %s", got)
+	}
+}

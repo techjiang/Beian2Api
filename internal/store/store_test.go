@@ -672,3 +672,60 @@ func TestListWatchPage(t *testing.T) {
 		t.Fatalf("limit=0 应全量返回，实际 %d", len(all))
 	}
 }
+
+// ListChanges 的回调返回 ErrStop 时应立即结束遍历，且不算错误。
+//
+// 增量拉取（since）靠它早停：key 是「时间戳-域名」，读到第一条更旧的就
+// 说明后面全是更旧的，没必要把整个变更流水反序列化一遍。
+func TestListChangesStopsEarly(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 20; i++ {
+		if err := s.AppendChange(fmt.Sprintf("%020d-example.com", 1700000000+i), map[string]any{"at": 1700000000 + i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := 0
+	err := s.ListChanges(0, func(raw []byte) (bool, error) {
+		seen++
+		if seen == 3 {
+			return false, ErrStop
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("ErrStop 不应被当成错误: %v", err)
+	}
+	if seen != 3 {
+		t.Fatalf("应在第 3 条处停止，实际遍历了 %d 条", seen)
+	}
+}
+
+// UpdateWatchIfExists 只在条目存在时写入：巡检不能把已移出的域名复活。
+func TestUpdateWatchIfExists(t *testing.T) {
+	s := open(t)
+	ok, err := s.UpdateWatchIfExists(&WatchItem{Domain: "gone.com", AddedAt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("条目不存在时不该写入")
+	}
+	if _, err := s.GetWatch("gone.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("不该凭空创建监控项，实际 err=%v", err)
+	}
+
+	if err := s.PutWatch(&WatchItem{Domain: "here.com", AddedAt: 1, LastFP: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = s.UpdateWatchIfExists(&WatchItem{Domain: "here.com", AddedAt: 1, LastFP: "new", Changes: 2})
+	if err != nil || !ok {
+		t.Fatalf("条目存在时应写入，ok=%v err=%v", ok, err)
+	}
+	it, err := s.GetWatch("here.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.LastFP != "new" || it.Changes != 2 {
+		t.Fatalf("写入未生效: %+v", it)
+	}
+}

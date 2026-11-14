@@ -391,3 +391,21 @@ func TestValidateAcceptsAuthCombos(t *testing.T) {
 		t.Fatalf("都没配时应通过：%v", err)
 	}
 }
+
+// 布尔环境变量必须走同一个解析。
+// 这里原来只认 "1" 和 "true"，于是 `BEIAN2API_WATCH_ENABLED=no` 照样开着巡检，
+// 而配的人以为已经关掉了——配错一个词，行为完全相反，还没有任何提示。
+func TestWatchEnabledEnvAcceptsCommonSpellings(t *testing.T) {
+	cases := map[string]bool{
+		"1": true, "true": true, "TRUE": true, "yes": true, "on": true,
+		"0": false, "false": false, "no": false, "off": false,
+	}
+	for v, want := range cases {
+		t.Setenv("BEIAN2API_WATCH_ENABLED", v)
+		c := Default()
+		c.applyEnv()
+		if c.Watch.Enabled != want {
+			t.Errorf("BEIAN2API_WATCH_ENABLED=%q 应为 %v，实际 %v", v, want, c.Watch.Enabled)
+		}
+	}
+}

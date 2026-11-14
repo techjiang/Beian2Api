@@ -269,7 +269,8 @@ func (w *Watcher) check(ctx context.Context, it store.WatchItem) (Change, bool) 
 func (w *Watcher) onFailure(it *store.WatchItem, err error, now int64) (Change, bool) {
 	it.LastError = err.Error()
 	it.FailStreak++
-	defer func() { _ = w.st.PutWatch(it) }()
+	// 用「存在才写」：巡检跑一轮的这段时间里，用户可能已经把它移出了。
+	defer func() { _, _ = w.st.UpdateWatchIfExists(it) }()
 
 	if it.FailStreak < w.failThreshold || it.Alerted {
 		// 还没到阈值，或者这轮故障已经报过了：不重复打扰。
@@ -297,7 +298,7 @@ func (w *Watcher) onSuccess(it *store.WatchItem, res *model.Result, prev *model.
 	it.FailStreak, it.Alerted = 0, false
 	it.LastError = ""
 	it.LastOKAt = now
-	_ = w.st.PutWatch(it)
+	_, _ = w.st.UpdateWatchIfExists(it)
 
 	// 上游明确答复"没有备案"也是一次真实的状态变化：域名可能被注销了。
 	// 这是备案巡检最该报出来的一种变更，之前直接 return 掉了。
@@ -316,11 +317,11 @@ func (w *Watcher) onSuccess(it *store.WatchItem, res *model.Result, prev *model.
 
 	if it.LastFP == "" {
 		it.LastFP = fp
-		_ = w.st.PutWatch(it)
+		_, _ = w.st.UpdateWatchIfExists(it)
 		return Change{}, false
 	}
 	if it.LastFP == fp {
-		_ = w.st.PutWatch(it)
+		_, _ = w.st.UpdateWatchIfExists(it)
 		if recovered {
 			return w.recoveredChange(it, streak, now)
 		}
@@ -333,7 +334,7 @@ func (w *Watcher) onSuccess(it *store.WatchItem, res *model.Result, prev *model.
 	}
 	it.LastFP = fp
 	it.Changes++
-	_ = w.st.PutWatch(it)
+	_, _ = w.st.UpdateWatchIfExists(it)
 
 	ch := Change{Domain: it.Domain, At: now, ICPCode: cur.ICPCode, Kind: kind, Current: &cur, Previous: prev}
 	if kind == "registered" || prev == nil {
@@ -356,11 +357,11 @@ func (w *Watcher) onAbsent(it *store.WatchItem, prev *model.Record, recovered bo
 		// 首次巡检就没有备案：建立基线，不报警。
 		it.LastFP = fpAbsent
 		it.LastICP = ""
-		_ = w.st.PutWatch(it)
+		_, _ = w.st.UpdateWatchIfExists(it)
 		return Change{}, false
 	}
 	if it.LastFP == fpAbsent {
-		_ = w.st.PutWatch(it)
+		_, _ = w.st.UpdateWatchIfExists(it)
 		if recovered {
 			return w.recoveredChange(it, streak, now)
 		}
@@ -370,7 +371,7 @@ func (w *Watcher) onAbsent(it *store.WatchItem, prev *model.Record, recovered bo
 	it.LastFP = fpAbsent
 	it.LastICP = ""
 	it.Changes++
-	_ = w.st.PutWatch(it)
+	_, _ = w.st.UpdateWatchIfExists(it)
 	ch := Change{
 		Domain: it.Domain, At: now, Kind: "revoked", Previous: prev,
 		Diff: []service.FieldChange{

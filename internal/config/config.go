@@ -213,7 +213,10 @@ func (c *Config) applyEnv() {
 		}
 	}
 	if v := os.Getenv("BEIAN2API_WATCH_ENABLED"); v != "" {
-		c.Watch.Enabled = v == "1" || strings.EqualFold(v, "true")
+		// 和其它布尔环境变量走同一个解析：这里原来只认 "1" 和 "true"，
+		// 于是 `BEIAN2API_WATCH_ENABLED=false` 生效、`=yes` 却被当成开启，
+		// 而 `=no` / `=off` 这种写法照样把巡检打开——配的人以为关掉了。
+		c.Watch.Enabled = truthyEnv(v)
 	}
 	if v := os.Getenv("BEIAN2API_RETAIN_CHANGES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
