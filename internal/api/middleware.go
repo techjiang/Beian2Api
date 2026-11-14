@@ -194,6 +194,38 @@ func allowMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
 	}
 }
 
+// allowExactMethods 与 allowMethods 相同，但**不**顺手放行 HEAD。
+//
+// HEAD 在 Go 里会被通用地当成「GET 但不写响应体」处理（allowMethods 正是
+// 这么做的），对只读接口这完全正确。但对会**产生副作用**的接口它是个陷阱：
+// 在线备份每收到一次 HEAD 就真的在磁盘上写出一份快照文件——
+// 而探针、负载均衡健康检查、`curl -I`、CDN 预热随手就在发 HEAD。
+// 一个「我只是问一下它活着没」的请求不该往磁盘里留东西。
+//
+// 这类接口没有「HEAD 语义」可言（HEAD 的承诺是「与 GET 相同、只是不带响应体」，
+// 而它连 GET 都会写文件），所以干脆拒掉并给出 Allow，比装作支持诚实。
+func allowExactMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
+	allow := make(map[string]struct{}, len(methods))
+	list := make([]string, 0, len(methods))
+	for _, m := range methods {
+		m = strings.ToUpper(m)
+		if _, ok := allow[m]; ok {
+			continue
+		}
+		allow[m] = struct{}{}
+		list = append(list, m)
+	}
+	header := strings.Join(list, ", ")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := allow[r.Method]; ok {
+			next(w, r)
+			return
+		}
+		w.Header().Set("Allow", header)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 "+header)
+	}
+}
+
 // withRateLimit 包装限流。
 func (s *Server) withRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	if s.limiter == nil {

@@ -486,9 +486,28 @@ func (s *Store) GetWatch(domain string) (*WatchItem, error) {
 
 // DeleteWatch 删除监控项。
 func (s *Store) DeleteWatch(domain string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketWatch).Delete([]byte(domain))
+	_, err := s.DeleteWatchIfExists(domain)
+	return err
+}
+
+// DeleteWatchIfExists 删除监控项，并告诉你它原本在不在。
+//
+// 存在的意义只是「如实回报」：bbolt 的 Delete 对不存在的 key 返回 nil，
+// 于是「移出一个从来没加过的域名」和「移出一个真的在监控的域名」在
+// 调用方眼里完全一样。批量移出时这就变成一句假话——后台弹「移出 2 个」，
+// 而那 2 个域名根本没在列表里，用户会以为自己看错了，或者怀疑列表没刷新。
+// 同一个坑之前在删缓存、删变更流水上已经踩过两次了。
+func (s *Store) DeleteWatchIfExists(domain string) (bool, error) {
+	existed := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketWatch)
+		if b.Get([]byte(domain)) == nil {
+			return nil
+		}
+		existed = true
+		return b.Delete([]byte(domain))
 	})
+	return existed, err
 }
 
 // ListWatch 列出全部监控项。
@@ -938,14 +957,27 @@ type MaintResult struct {
 }
 
 // AppendChange 记录一条变更事件，key 按时间倒序可遍历。
+//
+// 顺手给 "changes" 计数器加一。
+//
+// 这一步漏了很久：seriesFields 里明明登记了 "changes"，后台概览的
+// 趋势图也画着「变更（底部柱条）」，但全项目没有第二处调 Incr("changes")。
+// 于是那排柱条永远是空的——图上看不出「什么时候有变动」，而这条曲线
+// 存在的唯一理由就是这个。计数放在写入的唯一入口里，而不是让调用方
+// 自己记：两处分别记迟早会漂（watch 是自己 append 变更的，漏了就是 0）。
 func (s *Store) AppendChange(id string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err = s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketChanges).Put([]byte(id), b)
 	})
+	if err != nil {
+		return err
+	}
+	_, _ = s.Incr("changes", 1)
+	return nil
 }
 
 // ErrStop 由 ListChanges 的回调返回，表示「不必再往前遍历了」。

@@ -54,9 +54,19 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// 只接受纯文件名，防止路径穿越。
+	// 只接受纯文件名，防止路径穿越；而且必须以 .db 结尾。
+	//
+	// 后缀这一条不是洁癖：备份列表和「清空备份」都只认 `.db`（它们要保护
+	// 目录里用户自己放的东西）。一个不以 .db 结尾的快照会写进磁盘、
+	// 在后台看不见、删不掉、也不会被清理——纯占地方，而且没人知道它在。
+	// `beian2api backup -server ... -o /tmp/snap` 正好会走到这条路上。
 	if strings.ContainsAny(name, `/\`) || strings.HasPrefix(name, ".") {
 		writeErr(w, http.StatusBadRequest, "invalid_name", "name 只能是纯文件名")
+		return
+	}
+	if !strings.HasSuffix(name, ".db") {
+		writeErr(w, http.StatusBadRequest, "invalid_name",
+			"name 必须以 .db 结尾，否则这份快照不会出现在备份列表里，也清理不掉")
 		return
 	}
 	dst := filepath.Join(dir, name)

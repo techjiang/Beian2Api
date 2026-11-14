@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -381,6 +382,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	// counts.keys 说的是「这个实例有几把 API Key」。
+	//
+	// 它一直读的是 apikeys 那个 bucket——而那个 bucket 从来没有人写过：
+	// Key 只存在于配置文件和环境变量里，服务启动时读进内存，不落库。
+	// 于是这个字段恒为 0，界面上就是「一把 Key 都没有」，而实例可能正
+	// 用着两把 Key 拦着全网。问的是安全配置，答的却是个空桶。
+	c.Keys = len(s.keys)
 	hits := s.svc.Store().Stat("hits")
 	misses := s.svc.Store().Stat("misses")
 	stale := s.svc.Store().Stat("stale")
@@ -479,6 +487,23 @@ func decodeJSON(r *http.Request, v any) error {
 			return fmt.Errorf("请求体超过 %d KB 上限", maxBodyBytes>>10)
 		}
 		return errors.New("请求体不是合法 JSON")
+	}
+	// 第一个 JSON 值之后必须什么都没有。
+	//
+	// json.Decoder 只解第一个值就收工，剩下的原样留在流里。于是
+	// `{"domain":"a.com"}{"domain":"b.com"}` 会成功返回 a.com 的结果，
+	// 而发请求的人（尤其是拼字符串拼出来的脚本）以为自己提交了两个。
+	// 后台的批量接口更糟：`{"domains":[...]}{"action":"remove"}`
+	// 会按默认 add 执行——收到的意图被悄悄改写了一半，还回 200。
+	//
+	// 多出来的不是合法 JSON 时也要报错：这种情况下多出来的内容是
+	// 一串垃圾，说明请求体本身拼错了，不能装作没看见。
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return fmt.Errorf("请求体超过 %d KB 上限", maxBodyBytes>>10)
+		}
+		return errors.New("请求体里只能有一个 JSON 对象")
 	}
 	return nil
 }

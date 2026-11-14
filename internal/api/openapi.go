@@ -286,8 +286,13 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 					"responses": withErr(),
 				},
 				"delete": map[string]any{
-					"summary":   "删除 backups 目录里的全部 .db 快照",
-					"tags":      []string{"后台"},
+					// 带 name 只删一个、不带才是清空。之前 name 根本没被读取，
+					// 于是「删这一个」实际执行的是「清空整个备份目录」。
+					"summary": "删除 backups 里的快照：带 name 只删那一个，不带 name 清空全部 .db",
+					"tags":    []string{"后台"},
+					"parameters": []map[string]any{
+						q("name", str("要删除的备份文件名（纯文件名、以 .db 结尾）。留空表示清空全部"), false),
+					},
 					"responses": withErr(),
 				},
 			},

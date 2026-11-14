@@ -46,6 +46,12 @@ func cmdBackup(args []string) error {
 	if dst == "" {
 		dst = filepath.Join(cfg.DataDir, "backups", "beian2api-"+time.Now().Format("20060102-150405")+".db")
 	}
+	// 本地备份也要能进后台的备份列表，否则它会成为一个谁也不知道的孤儿文件。
+	// 只在「指向默认的 backups 目录」时强制，随手 -o 到别处（拿去归档、拷到
+	// 另一台机器）不受限制——那份文件本来就该由使用者自己管。
+	if !strings.HasSuffix(dst, ".db") && strings.Contains(dst, string(filepath.Separator)+"backups"+string(filepath.Separator)) {
+		return fmt.Errorf("备份文件名 %q 必须以 .db 结尾，否则后台的备份列表里看不到它，也删不掉", filepath.Base(dst))
+	}
 	if err := st.Snapshot(dst); err != nil {
 		return err
 	}
@@ -176,9 +182,23 @@ func cmdKeygen(args []string) error {
 
 // backupOnline 调用运行中服务的备份接口，服务不需要停机。
 func backupOnline(server, key, out string) error {
-	u := strings.TrimRight(server, "/") + "/api/v1/admin/backup"
+	// 本地先校验后缀，而不是把 -o /tmp/snap 原样发出去让服务端回 400。
+	//
+	// 服务端要求 .db 是有理由的（备份列表和「清空备份」只认这个后缀，
+	// 不带后缀的快照会占着磁盘、在后台看不见、也删不掉）。但那条规则从
+	// 命令行的角度看只是一句「你的 -o 少了个后缀」——在这里说清楚，
+	// 比让人对着一句服务端错误去猜要好。
+	name := ""
 	if out != "" {
-		u += "?name=" + urlQueryEscape(filepath.Base(out))
+		name = filepath.Base(out)
+		if !strings.HasSuffix(name, ".db") {
+			return fmt.Errorf("-o %q 必须以 .db 结尾：在线备份的文件名会出现在后台的备份列表里，"+
+				"而那里只认 .db（例如 -o /backup/%s.db）", out, name)
+		}
+	}
+	u := strings.TrimRight(server, "/") + "/api/v1/admin/backup"
+	if name != "" {
+		u += "?name=" + urlQueryEscape(name)
 	}
 	req, err := http.NewRequest(http.MethodPost, u, nil)
 	if err != nil {

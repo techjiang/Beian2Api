@@ -94,8 +94,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/notify/status", read(s.handleNotifyStatus))
 	mux.HandleFunc("/api/v1/notify/test", s.withRateLimit(s.withAuth(allowMethods(s.handleNotifyTest, http.MethodPost))))
 	mux.HandleFunc("/api/v1/verify", read(s.handleVerify))
+	// 备份接口不放行 HEAD：它是唯一一个「读一下就会写文件」的接口，
+	// 而 HEAD 是探针最常用的方法。见 allowExactMethods 的注释。
 	mux.HandleFunc("/api/v1/admin/backup", s.withRateLimit(s.withAuth(
-		allowMethods(s.handleAdminBackup, http.MethodGet, http.MethodPost))))
+		allowExactMethods(s.handleAdminBackup, http.MethodGet, http.MethodPost))))
 	mux.HandleFunc("/api/v1/openapi.json", allowMethods(s.handleOpenAPI, http.MethodGet))
 
 	// 后台管理。方法与常规读接口一样显式声明，破坏性操作额外过 withAdmin：

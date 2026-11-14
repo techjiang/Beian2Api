@@ -739,6 +739,23 @@ function withKey(path) {
           }
         });
         act.appendChild(cp);
+        // 单个删除。之前这一行只能「复制路径」，要清掉一份旧备份只有
+        // 「全部删掉」一个按钮——而备份是出事时最后一份数据，
+        // 让人用「删全部」来删其中一个，是把刀递错了方向。
+        // 服务端 DELETE ?name= 之前也不认 name（等于清空），这轮一并修了。
+        var rm = el('button', 'mini danger', '删除');
+        rm.type = 'button';
+        rm.addEventListener('click', function () {
+          if (!confirm('删除这份备份？\n\n' + b.name + '\n\n这是真的删文件，不可恢复。')) return;
+          rm.disabled = true;
+          api('/api/v1/admin/backups?name=' + encodeURIComponent(b.name), { method: 'DELETE' })
+            .then(function (r) {
+              toast(r.deleted ? '已删除 ' + b.name : b.name + ' 已经不在了');
+              loadBackups();
+            })
+            .catch(function (err) { toast(err.message, true); rm.disabled = false; });
+        });
+        act.appendChild(rm);
         tbody(t).appendChild(tr);
       });
       host.appendChild(t);
@@ -872,6 +889,11 @@ function withKey(path) {
         var msg = (action === 'add' ? '加入 ' : '移出 ') + num(d.added) + ' 个';
         if (d.duplicated) msg += '，重复跳过 ' + num(d.duplicated) + ' 个';
         if (d.failed) msg += '，失败 ' + num(d.failed) + ' 个：' + d.invalid.join('、');
+        // 移出时「本来就不在列表里」的域名要单独说。不然「移出 2 个」
+        // 弹出来、列表一点没变，用户只能怀疑自己看错了。
+        if (d.missing && d.missing.length) {
+          msg += '，' + num(d.missing.length) + ' 个本来就不在列表里：' + d.missing.join('、');
+        }
         toast(msg, d.failed > 0);
         $('#w-bulk-tip').textContent = msg;
         if (!d.failed) $('#w-bulk').value = '';

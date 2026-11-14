@@ -58,6 +58,9 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	// 同 handleStats 里的 counts.keys：apikeys bucket 从没被写过，
+	// Key 只在内存里，所以这里按实际生效的 Key 数量如实报。
+	c.Keys = len(s.keys)
 	hits, misses, stale := s.svc.Store().Stat("hits"), s.svc.Store().Stat("misses"), s.svc.Store().Stat("stale")
 	total := hits + misses
 	rate := 0.0
@@ -414,6 +417,13 @@ func (s *Server) handleAdminWatchBulk(w http.ResponseWriter, r *http.Request) {
 	// 已加、一半没加的列表，而响应里什么都不说。
 	var mu sync.Mutex
 	var ok []string
+	// missing 是「移出时本来就不在列表里」的那些。
+	//
+	// 之前它们也被算进 ok：`{"action":"remove","added":2,"ok":["nope1.com","nope2.com"]}`
+	// ——两个从没加过的域名，回了「移出 2 个」。界面上会弹一句成功提示，
+	// 而列表一点变化都没有，用户只能怀疑自己看错了。移出是「让某个域名
+	// 不再被巡检」的动作，没在列表里就等于没做成，得说没做成。
+	var missing []string
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	for _, d := range clean {
@@ -429,19 +439,27 @@ func (s *Server) handleAdminWatchBulk(w http.ResponseWriter, r *http.Request) {
 					mu.Unlock()
 					return
 				}
-			} else if err := s.svc.Store().DeleteWatch(d); err != nil {
 				mu.Lock()
-				bad = append(bad, d)
+				ok = append(ok, d)
 				mu.Unlock()
 				return
 			}
+			existed, err := s.svc.Store().DeleteWatchIfExists(d)
 			mu.Lock()
-			ok = append(ok, d)
-			mu.Unlock()
+			defer mu.Unlock()
+			switch {
+			case err != nil:
+				bad = append(bad, d)
+			case !existed:
+				missing = append(missing, d)
+			default:
+				ok = append(ok, d)
+			}
 		}(d)
 	}
 	wg.Wait()
 	sort.Strings(ok)
+	sort.Strings(missing)
 
 	// 全失败时别回 200 + 空列表：那看起来像「成功了，只是没加进去」。
 	if len(clean) > 0 && len(ok) == 0 {
@@ -449,10 +467,15 @@ func (s *Server) handleAdminWatchBulk(w http.ResponseWriter, r *http.Request) {
 			"全部域名都没处理成功，请检查上游连通性后重试")
 		return
 	}
-	writeOK(w, map[string]any{
+	out := map[string]any{
 		"action": action, "added": len(ok), "failed": len(bad),
 		"duplicated": dup, "ok": ok, "invalid": bad,
-	})
+	}
+	if len(missing) > 0 {
+		// 只有真出现才带上这个字段，老调用方读到的形状不变。
+		out["missing"] = missing
+	}
+	writeOK(w, out)
 }
 
 // bulkWindow 估算批量加/移监控需要多久。
@@ -490,9 +513,20 @@ func (s *Server) handleAdminWatchPurge(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"removed": n})
 }
 
-// handleAdminBackups 列出或清空 backups 目录里的快照文件。
+// handleAdminBackups 列出或删除 backups 目录里的快照文件。
+//
+// DELETE 分两种语义：带 name 只删那一个，不带 name 才是清空。
+//
+// 之前这里不分：`DELETE /api/v1/admin/backups?name=mine.db` 会把你**全部**
+// 备份删掉。name 参数根本没被读取过——路径、OpenAPI、后台按钮上写着
+// 「删这一个」，实际执行的却是「删全部」。备份是出事时最后一份数据，
+// 一次手滑就全没了，而响应只回一句 `removed: 3`，看着还挺正常。
 func (s *Server) handleAdminBackups(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
+		if name := strings.TrimSpace(r.URL.Query().Get("name")); name != "" {
+			s.deleteBackup(w, name)
+			return
+		}
 		s.purgeBackups(w, r)
 		return
 	}
@@ -506,6 +540,35 @@ func (s *Server) handleAdminBackups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeOK(w, map[string]any{"dir": s.backupDir(), "total": len(items), "size_bytes": total, "items": items})
+}
+
+// deleteBackup 删掉指定名字的一个快照文件。
+//
+// 名字必须是纯文件名且以 .db 结尾：拼接路径前要挡住 `../`，
+// 也要挡住「删掉同目录里用户自己放的其他文件」。删完如实回
+// removed: 0/1——删一个本来不存在的名字却回「成功」，只会让人
+// 以为自己记错了文件名，或者怀疑按钮没生效。
+func (s *Server) deleteBackup(w http.ResponseWriter, name string) {
+	dir := s.backupDir()
+	if strings.ContainsAny(name, "/\\") || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".db") {
+		writeErr(w, http.StatusBadRequest, "invalid_name",
+			"name 只能是 backups 目录下的 .db 文件名，不能带路径")
+		return
+	}
+	dst := filepath.Join(dir, name)
+	if _, err := os.Stat(dst); err != nil {
+		if os.IsNotExist(err) {
+			writeOK(w, map[string]any{"name": name, "removed": 0, "deleted": false})
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "stat_failed", err.Error())
+		return
+	}
+	if err := os.Remove(dst); err != nil {
+		writeErr(w, http.StatusInternalServerError, "delete_failed", err.Error())
+		return
+	}
+	writeOK(w, map[string]any{"name": name, "removed": 1, "deleted": true})
 }
 
 // purgeBackups 清空 backups 目录（只删 .db）。

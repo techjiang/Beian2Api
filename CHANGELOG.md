@@ -2,6 +2,51 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.13.0] - 2026-11-14
+
+这轮的问题都是「在真跑起来的实例上手动打一遍」撞出来的，不是在编辑器里想出来的。
+五条里有三条属于同一类：**接口做了一件比它承诺的更大的事**。
+
+### 修复
+
+- **`DELETE /api/v1/admin/backups?name=x.db` 会清空整个备份目录**。`name`
+  参数从来没被读取过：路径、`docs/API.md`、后台按钮上都写着「删这一个」，
+  实际执行的是「删全部」。备份是出事时最后一份数据，一次手滑全没了，而响应
+  只回一句 `removed: 3`，看着还挺正常。现在带 `name` 只删那一个（并校验
+  纯文件名 + `.db` 后缀），不带 `name` 才是清空；删不存在的文件回
+  `removed: 0` / `deleted: false`。后台备份列表也补上了「删除」按钮。
+- **`HEAD /api/v1/admin/backup` 会真的写出一份快照文件**。`allowMethods`
+  会顺手放行 HEAD（对只读接口是对的），但这个接口读一下就往磁盘写文件，
+  而 HEAD 正是探针、健康检查、`curl -I` 最常用的方法——反复探活能把磁盘写满。
+  新增 `allowExactMethods`：不顺手放行 HEAD，405 并给出 `Allow: GET, POST`。
+- **`counts.keys` 恒为 0**。它读的是 `apikeys` bucket，而那个 bucket 从来
+  没有人写过——Key 只在配置文件和环境变量里，启动时读进内存，不落库。
+  于是界面上永远显示「一把 Key 都没有」，而实例可能正用着两把 Key 拦着全网。
+  问的是安全配置，答的却是个空桶。`/api/v1/stats` 与后台概览都改为按实际
+  生效的 Key 数量报。
+- **后台批量移出监控会谎报成功**。移出一个从来没加过的域名回「移出成功」——
+  bbolt 的 `Delete` 对不存在的 key 返回 nil，代码又把这个 nil 当成功。
+  后台于是弹「移出 2 个」而列表一点没变，用户只能怀疑自己看错了。新增
+  `store.DeleteWatchIfExists`，响应多一个 `missing` 字段如实列出它们。
+- **请求体里第二个 JSON 值被静默丢弃**。`json.Decoder` 只解第一个值就收工。
+  `{"domain":"a.com"}{"domain":"b.com"}` 会成功返回 a.com 的结果，而拼字符串
+  的脚本以为自己提交了两个；后台批量接口更糟：`{"domains":[...]}{"action":"remove"}`
+  会按默认 `add` 执行完，还回 200——收到的意图被悄悄改写了一半。现在尾随
+  任何内容都回 400 `bad_request`。
+- **趋势图的「变更」柱条永远是空的**。`seriesFields` 里登记着 `changes`，
+  后台概览也画着这一排柱条，但全项目没有第二处调 `Incr("changes")`。
+  计数放进 `store.AppendChange`（变更写入的唯一入口），而不是让调用方自己记。
+- **备份文件名不以 `.db` 结尾时成孤儿**。备份列表和「清空备份」都只认 `.db`，
+  于是一个 `?name=snapshot` 写出来的快照会占着磁盘、在后台看不见、也删不掉。
+  现在明确要求 `.db` 后缀并说明原因。
+
+### 变更
+
+- `DELETE /api/v1/admin/backups` 支持 `name`；响应形状 `{name, removed, deleted}`。
+- `POST /api/v1/admin/watch/bulk` 的 `remove` 响应新增 `missing`（仅在有值时出现）。
+- `GET /api/v1/stats` 与 `GET /api/v1/admin/overview` 的 `counts.keys` 现在是真实 Key 数量。
+- OpenAPI 补上 `backups` 的 `name` 参数与两条删除语义。
+
 ## [1.12.0] - 2026-11-14
 
 翻页改成游标；顺手修掉三个「看起来成功，其实什么都没做对」的地方。
