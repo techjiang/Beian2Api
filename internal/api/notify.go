@@ -58,6 +58,9 @@ func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	}
 	// 测试消息要同步返回结果，但别让一个卡死的通道拖住请求：
 	// 单个通道本身有 10 秒超时 + 有限重试，这里再给整体一个上限。
+	// 整体 30 秒上限，但响应的写超时默认也只有 30 秒（且从读完请求头就开始计），
+	// 于是「全部通道都慢」时测试结果必然送不回去。留出余量。
+	defer extendWriteDeadline(w, 45*time.Second)()
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	results := d.Send(ctx, notify.Event{Kind: notify.EventTest, At: time.Now().Unix(), BaseURL: s.baseURL})

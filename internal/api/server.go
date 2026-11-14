@@ -123,6 +123,10 @@ type statusWriter struct {
 	code int
 }
 
+// Unwrap 让 http.ResponseController 能穿透这一层包装拿到真实连接。
+// 少了这个方法，SetWriteDeadline 会静默失效——长任务照样被 30 秒掐断。
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) WriteHeader(c int) {
 	w.code = c
 	w.ResponseWriter.WriteHeader(c)
@@ -155,4 +159,26 @@ func writeOK(w http.ResponseWriter, data any) {
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, envelope{OK: false, Error: &errObj{Code: code, Message: msg}})
+}
+
+// extendWriteDeadline 把一个长任务的响应写超时往后推。
+//
+// http.Server 的 WriteTimeout 是 30 秒，它从**读完请求头**就开始计时，
+// 覆盖整个 handler 的执行。而「立即巡检」的窗口可以被估到几十分钟、
+// 在线备份要拷整个数据文件、推送测试要等最多 30 秒——这些接口在
+// 监控域名稍多一点时必然跑过 30 秒，响应直接写不回去，浏览器侧看到的是
+// 连接被掐断，而服务端日志里一片成功。前端「巡检中…」永远转下去，
+// 用户以为点到没反应，其实巡检跑完了、结果没人收到。
+//
+// 用 http.ResponseController 只调这一个请求的写超时，不动全局值。
+// 返回的 cancel 在 handler 结束时把超时恢复，避免影响连接复用的后续请求。
+func extendWriteDeadline(w http.ResponseWriter, d time.Duration) func() {
+	rc := http.NewResponseController(w)
+	prevErr := rc.SetWriteDeadline(time.Now().Add(d))
+	if prevErr != nil {
+		// 不支持 SetWriteDeadline（比如被中间件包了几层又没实现 Unwrap）
+		// 时不算致命：照常执行，只是超时还是全局值。
+		return func() {}
+	}
+	return func() { _ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second)) }
 }

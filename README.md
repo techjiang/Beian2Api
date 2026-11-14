@@ -120,7 +120,7 @@ curl "http://localhost:8080/api/v1/query?domain=example.com"
 | POST | `/api/v1/watch` | 加入巡检列表 |
 | DELETE | `/api/v1/watch` | 移出巡检列表 |
 | GET | `/api/v1/watch/list` | 巡检列表 |
-| GET | `/api/v1/watch/status` | 巡检运行概况（是否在跑 / 上次 / 下次） |
+| GET | `/api/v1/watch/status` | 巡检运行概况（是否在跑 / 上次 / 下次），分页 |
 | POST | `/api/v1/watch/run` | 立即执行一轮巡检 |
 | GET | `/api/v1/changes` | 变更事件流水（含注销、上游异常、恢复） |
 | GET | `/api/v1/changes.rss` | 变更事件 RSS |
@@ -224,7 +224,13 @@ curl -X POST localhost:8080/api/v1/notify/test
 不会因为你重启服务就额外打一轮上游。
 
 首页的监控面板会显示「上次 12 分钟前 · 下次 6 小时后」，也可以直接调 `/api/v1/watch/status`。
+这个接口默认分页（每页 20 条），域名多的时候首页显示「展开更多（还有 N 个）」，
+不会为了渲染十几行把上千个监控项全量拉一遍。
 推送通道的最近状态在同一页的「推送通道」面板里，`/api/v1/notify/status` 是它的数据源。
+
+一个域名有多条备案（主体下多个网站）时，历史快照、巡检比对、SVG 徽章、备案号交叉核对
+统一取「站点序号最小」的那条作为代表记录。这件事必须只有一个答案：如果历史记 `-1`、
+巡检比 `-3`，一次真实变更会被报成两条不同字段，而上游只是把列出顺序换一下，也会被误报成变更。
 
 ## 部署
 

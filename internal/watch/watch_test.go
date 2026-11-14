@@ -545,3 +545,51 @@ func TestCanceledRunNotCountedAsFailure(t *testing.T) {
 		t.Fatalf("取消不该被记成失败: %+v", item)
 	}
 }
+
+// 多站点域名：巡检必须和 service 写入历史时挑同一条代表记录。
+//
+// 历史按「站点序号最小」记，巡检如果拿 Records[0] 比，同一次真实变更
+// 会报成两条不同字段，而且上游列出顺序一变就报出根本不存在的差异。
+func TestRunOnceUsesSamePrimaryAsHistory(t *testing.T) {
+	w, st, sb := setup(t)
+	sb.recs = []model.Record{
+		normalize("粤ICP备1号-3", "示例公司"),
+		normalize("粤ICP备1号-1", "示例公司"),
+	}
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("首轮只建基线，实际 %d 条", len(ch))
+	}
+	item, _ := st.GetWatch("example.com")
+	if item.LastICP != "粤ICP备1号-1" {
+		t.Fatalf("基线应取站点序号最小的那条，实际 %s", item.LastICP)
+	}
+
+	// 只把上游的列出顺序倒过来，内容一点没变：不该报变更。
+	sb.recs = []model.Record{
+		normalize("粤ICP备1号-1", "示例公司"),
+		normalize("粤ICP备1号-3", "示例公司"),
+	}
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("顺序变化不是变更，实际 %d 条: %+v", len(ch), ch)
+	}
+}
+
+// 分页状态：总数应当等于真实个数，不是「这一页有多少条」。
+func TestStatusPageTotals(t *testing.T) {
+	w, st, _ := setup(t)
+	for _, d := range []string{"a.com", "b.com", "c.com"} {
+		_ = st.PutWatch(&store.WatchItem{Domain: d})
+	}
+	s := w.StatusPage(true, 2, 0)
+	if s.Total != 3 || len(s.Items) != 2 || !s.HasMore {
+		t.Fatalf("首页 2 条、总数 3、还有更多: %+v", s)
+	}
+	s2 := w.StatusPage(true, 2, 2)
+	if s2.Total != 3 || len(s2.Items) != 1 || s2.HasMore {
+		t.Fatalf("第二页应剩 1 条且没有更多: %+v", s2)
+	}
+	if w.Total() != 3 {
+		t.Fatalf("Total() 应只数个数，实际 %d", w.Total())
+	}
+}

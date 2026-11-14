@@ -640,3 +640,35 @@ func TestRestoreOverwritesCurrentState(t *testing.T) {
 		t.Fatalf("文件里的缓存应写入: %v", err)
 	}
 }
+
+// 分页读监控项：总数只数个数，明细按域名升序分页，不把整桶读进内存。
+func TestListWatchPage(t *testing.T) {
+	s := open(t)
+	for _, d := range []string{"c.com", "a.com", "b.com", "e.com", "d.com"} {
+		if err := s.PutWatch(&WatchItem{Domain: d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := s.CountWatch(); err != nil || n != 5 {
+		t.Fatalf("CountWatch 应为 5，实际 %d %v", n, err)
+	}
+	page1, err := s.ListWatchPage(2, 0)
+	if err != nil || len(page1) != 2 {
+		t.Fatalf("第一页应 2 条，实际 %d %v", len(page1), err)
+	}
+	if page1[0].Domain != "a.com" || page1[1].Domain != "b.com" {
+		t.Fatalf("应按域名升序，实际 %s %s", page1[0].Domain, page1[1].Domain)
+	}
+	page3, _ := s.ListWatchPage(2, 4)
+	if len(page3) != 1 || page3[0].Domain != "e.com" {
+		t.Fatalf("最后一页应剩 e.com，实际 %+v", page3)
+	}
+	// offset 超出范围返回空，不 panic 也不回绕到第一条。
+	if beyond, _ := s.ListWatchPage(2, 99); len(beyond) != 0 {
+		t.Fatalf("越界应返回空，实际 %+v", beyond)
+	}
+	// limit<=0 保持老行为：全量返回。
+	if all, _ := s.ListWatchPage(0, 0); len(all) != 5 {
+		t.Fatalf("limit=0 应全量返回，实际 %d", len(all))
+	}
+}

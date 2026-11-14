@@ -92,6 +92,10 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "too_many_domains", "单次最多 50 个域名")
 		return
 	}
+	// 批量查询最坏耗时会随域名数线性放大：50 个域名、并发 5、单域名 8 秒超时，
+	// 就是 10 轮 × 8 秒 ≈ 80 秒，早就越过 30 秒的 WriteTimeout。
+	// 结果算出来了却写不回去，比直接报错更让人摸不着头脑。
+	defer extendWriteDeadline(w, batchWindow(len(clean)))()
 	items := s.svc.Batch(r.Context(), clean, service.Options{Refresh: refresh}, 5)
 	writeOK(w, map[string]any{"total": len(items), "items": items})
 }
@@ -219,12 +223,31 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 // handleWatchList 列出监控项。
 func (s *Server) handleWatchList(w http.ResponseWriter, r *http.Request) {
-	items, err := s.svc.Store().ListWatch()
+	q := r.URL.Query()
+	limit, err := parseLimit(q.Get("limit"), 0, 5000)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_limit", err.Error())
+		return
+	}
+	offset := 0
+	if v := strings.TrimSpace(q.Get("offset")); v != "" {
+		n, convErr := strconv.Atoi(v)
+		if convErr != nil || n < 0 {
+			writeErr(w, http.StatusBadRequest, "invalid_offset", fmt.Sprintf("offset 必须是非负整数，收到 %q", v))
+			return
+		}
+		offset = n
+	}
+	items, err := s.svc.Store().ListWatchPage(limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"total": len(items), "items": items, "interval": s.cfg.Watch.Interval})
+	if items == nil {
+		items = []store.WatchItem{}
+	}
+	total, _ := s.svc.Store().CountWatch()
+	writeOK(w, map[string]any{"total": total, "items": items, "interval": s.cfg.Watch.Interval})
 }
 
 // handleWatchRun 立即触发一轮巡检。
@@ -244,7 +267,12 @@ func (s *Server) handleWatchRun(w http.ResponseWriter, r *http.Request) {
 	// 窗口也不能写死 2 分钟：之前是固定值，监控 200 个域名、4 个 worker、
 	// 每个域名 30 秒超时，一轮要跑 25 分钟——窗口一到就被取消，剩下的大半
 	// 域名状态全停在中途。现在按「域名数 / worker 数 × 单域名超时」估算。
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.watchRunWindow())
+	window := s.watchRunWindow()
+	// 响应写超时也得跟着放宽：http.Server 的 WriteTimeout 只有 30 秒，
+	// 一轮 200 个域名的巡检会跑十几分钟，结果是「巡检跑完了，但浏览器
+	// 收到的是连接被掐断」，前端按钮永远停在「巡检中…」。
+	defer extendWriteDeadline(w, window+30*time.Second)()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), window)
 	defer cancel()
 	changes := s.watch.RunOnce(ctx)
 	writeOK(w, map[string]any{"changes": changes, "count": len(changes)})
@@ -256,7 +284,7 @@ func (s *Server) watchRunWindow() time.Duration {
 	const cushion = 30 * time.Second
 	window := 2 * time.Minute
 	if s.watch != nil {
-		total := s.watch.Status(s.cfg.Watch.Enabled).Total
+		total := s.watch.Total()
 		workers := s.cfg.Watch.Workers
 		if workers <= 0 {
 			workers = 1
@@ -275,16 +303,34 @@ func (s *Server) watchRunWindow() time.Duration {
 }
 
 // handleWatchStatus 返回巡检概况：是否在跑、上一轮何时、下一轮何时。
+//
+// 默认只返回第一页（默认 20 条，上限 200）：这个接口被首页每 60 秒轮询一次，
+// 域名上千时全量返回是纯粹的浪费——屏幕上就那十几行。剩下的靠 offset 翻。
 func (s *Server) handleWatchStatus(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, err := parseLimit(q.Get("limit"), 20, 200)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_limit", err.Error())
+		return
+	}
+	offset := 0
+	if v := strings.TrimSpace(q.Get("offset")); v != "" {
+		n, convErr := strconv.Atoi(v)
+		if convErr != nil || n < 0 {
+			writeErr(w, http.StatusBadRequest, "invalid_offset", fmt.Sprintf("offset 必须是非负整数，收到 %q", v))
+			return
+		}
+		offset = n
+	}
 	if s.watch == nil {
 		writeOK(w, map[string]any{
-			"enabled": false, "total": 0, "interval": 0,
+			"enabled": false, "total": 0, "interval": 0, "offset": 0, "limit": limit, "has_more": false,
 			"running": false, "last_run_at": 0, "last_count": 0, "next_run_at": 0,
 			"items": []any{},
 		})
 		return
 	}
-	writeOK(w, s.watch.Status(s.cfg.Watch.Enabled))
+	writeOK(w, s.watch.StatusPage(s.cfg.Watch.Enabled, limit, offset))
 }
 
 // handleStats 返回运行统计。
@@ -412,4 +458,19 @@ func truthy(s string) bool {
 		return true
 	}
 	return false
+}
+
+// batchWindow 估算批量查询需要多久：按并发度换算轮数，再乘单域名超时并留余量。
+func batchWindow(n int) time.Duration {
+	const perDomain = 8 * time.Second // 上游默认超时
+	const concurrency = 5
+	rounds := (n + concurrency - 1) / concurrency
+	if rounds < 1 {
+		rounds = 1
+	}
+	w := time.Duration(rounds)*perDomain + 5*time.Second
+	if w > 2*time.Minute {
+		w = 2 * time.Minute
+	}
+	return w
 }

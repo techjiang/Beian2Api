@@ -305,7 +305,12 @@ func (w *Watcher) onSuccess(it *store.WatchItem, res *model.Result, prev *model.
 		return w.onAbsent(it, prev, recovered, streak, now)
 	}
 
-	cur := res.Records[0]
+	// 多站点域名必须和 service.recordHistory 挑同一条代表记录，
+	// 否则历史里记的是 -1、巡检比的是 -3，同一次真实变更会报成两条不同字段。
+	cur, ok := model.Primary(res.Records)
+	if !ok {
+		return Change{}, false
+	}
 	fp := cur.Fingerprint()
 	it.LastICP = cur.ICPCode
 
@@ -440,9 +445,14 @@ func toNotifyFields(in []service.FieldChange) []notify.Field {
 
 // Status 是巡检概况。
 type Status struct {
-	Enabled   bool              `json:"enabled"`
-	Interval  int               `json:"interval"`
+	Enabled  bool `json:"enabled"`
+	Interval int  `json:"interval"`
+	// Total 是监控域名总数（一个数字，不是 len(Items)）：
+	// 分页之后 Items 只是其中一页，用它当总数会随翻页乱跳。
 	Total     int               `json:"total"`
+	Offset    int               `json:"offset"`
+	Limit     int               `json:"limit"`
+	HasMore   bool              `json:"has_more"`
 	Running   bool              `json:"running"`
 	LastRunAt int64             `json:"last_run_at"`
 	LastCount int               `json:"last_count"`
@@ -450,12 +460,26 @@ type Status struct {
 	Items     []store.WatchItem `json:"items"`
 }
 
-// Status 返回巡检概况。
+// Status 返回巡检概况（不分页，保留给内部调用与老调用方）。
 func (w *Watcher) Status(enabled bool) Status {
-	items, _ := w.st.ListWatch()
-	if items == nil {
+	return w.StatusPage(enabled, 0, 0)
+}
+
+// StatusPage 返回分页后的巡检概况。
+//
+// 首页每 60 秒轮询一次这个接口。之前无条件 ListWatch() 全量返回：
+// 1000 个域名就是 1000 次 JSON 反序列化，只为了渲染屏幕上能看见的那十几行。
+// 现在默认只给第一页（limit>0 时），总数单独数，翻页靠 offset。
+func (w *Watcher) StatusPage(enabled bool, limit, offset int) Status {
+	if offset < 0 {
+		offset = 0
+	}
+	items, err := w.st.ListWatchPage(limit, offset)
+	if err != nil || items == nil {
 		items = []store.WatchItem{}
 	}
+	total, _ := w.st.CountWatch()
+
 	w.mu.Lock()
 	running, lastRun, lastCount, nextRun := w.running, w.lastRun, w.lastCount, w.nextRun
 	w.mu.Unlock()
@@ -463,11 +487,28 @@ func (w *Watcher) Status(enabled bool) Status {
 		// 进程刚起来，回落到持久化记录，别让首页显示成「从没巡检过」。
 		lastRun, lastCount = w.st.Stat(metaLastRun), int(w.st.Stat(metaLastCount))
 	}
+	hasMore := false
+	if limit > 0 {
+		hasMore = offset+len(items) < total
+	}
 	return Status{
-		Enabled: enabled, Interval: int(w.interval / time.Second), Total: len(items),
+		Enabled: enabled, Interval: int(w.interval / time.Second), Total: total,
+		Offset: offset, Limit: limit, HasMore: hasMore,
 		Running: running, LastRunAt: lastRun, LastCount: lastCount, NextRunAt: nextRun,
 		Items: items,
 	}
+}
+
+// Total 返回监控域名个数，不读明细。
+func (w *Watcher) Total() int {
+	if w == nil {
+		return 0
+	}
+	n, err := w.st.CountWatch()
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (w *Watcher) setNext(ts int64) {

@@ -415,6 +415,48 @@ func (s *Store) ListWatch() ([]WatchItem, error) {
 	return out, err
 }
 
+// CountWatch 只数监控项个数，不把整个 bucket 读进内存。
+//
+// 首页每 60 秒轮询一次巡检状态，而「有几个域名在监控」这件事只需要一个数字。
+// 之前每次都 ListWatch() 全量反序列化，1000 个域名就是 1000 次 JSON 解析，
+// 只为在标题里显示「1000 个」。
+func (s *Store) CountWatch() (int, error) {
+	var n int
+	err := s.db.View(func(tx *bolt.Tx) error {
+		n = tx.Bucket(bucketWatch).Stats().KeyN
+		return nil
+	})
+	return n, err
+}
+
+// ListWatchPage 按域名升序分页读取监控项。
+//
+// 首页只显示前几十个就够，剩下的靠「展开」按需拉。之前 status 接口无条件
+// 返回全部：域名上千之后，每 60 秒一次全量轮询，接口本身变成了负担。
+// limit<=0 表示不限制（保持老行为），offset 超出范围返回空。
+func (s *Store) ListWatchPage(limit, offset int) ([]WatchItem, error) {
+	out := make([]WatchItem, 0, 16)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketWatch).Cursor()
+		skipped := 0
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if skipped < offset {
+				skipped++
+				continue
+			}
+			var w WatchItem
+			if json.Unmarshal(v, &w) == nil {
+				out = append(out, w)
+			}
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 // Count 统计各 bucket 的条目数。
 type Counts struct {
 	Cache   int `json:"cache"`

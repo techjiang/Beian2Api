@@ -650,3 +650,71 @@ func TestStatsExposesRetentionPolicy(t *testing.T) {
 		}
 	}
 }
+
+// since 写错必须报错：静默当成 0 会让增量同步的调用方把历史事件重复处理一遍。
+func TestChangesInvalidSinceRejected(t *testing.T) {
+	_, h := mkServer(t, nil)
+	for _, bad := range []string{"abc", "-5", "1.5"} {
+		resp, body := get(t, h, "/api/v1/changes?since="+bad, nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("since=%s 应返回 400，实际 %d: %s", bad, resp.StatusCode, body)
+		}
+		if !strings.Contains(body, "invalid_since") {
+			t.Fatalf("应给出 invalid_since: %s", body)
+		}
+	}
+	// 空值仍然表示「不限制」，合法时间戳照常工作。
+	if resp, body := get(t, h, "/api/v1/changes?since=", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("空 since 应放行，实际 %d: %s", resp.StatusCode, body)
+	}
+	if resp, body := get(t, h, "/api/v1/changes?since=100", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("合法 since 应放行，实际 %d: %s", resp.StatusCode, body)
+	}
+}
+
+// watch/status 默认分页：域名上千时不该每次轮询都全量返回。
+func TestWatchStatusPaginates(t *testing.T) {
+	s, h, _ := mkWatchServer(t)
+	for _, d := range []string{"a.com", "b.com", "c.com", "d.com", "e.com"} {
+		if err := s.svc.Store().PutWatch(&store.WatchItem{Domain: d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out struct {
+		Data struct {
+			Total   int  `json:"total"`
+			Offset  int  `json:"offset"`
+			Limit   int  `json:"limit"`
+			HasMore bool `json:"has_more"`
+			Items   []struct {
+				Domain string `json:"domain"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	_, body := get(t, h, "/api/v1/watch/status?limit=2", nil)
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Total != 5 || len(out.Data.Items) != 2 || !out.Data.HasMore || out.Data.Limit != 2 {
+		t.Fatalf("首页应 2 条、总数 5、还有更多: %s", body)
+	}
+	_, body = get(t, h, "/api/v1/watch/status?limit=2&offset=4", nil)
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Total != 5 || len(out.Data.Items) != 1 || out.Data.HasMore {
+		t.Fatalf("第二页末尾应只剩 1 条且没有更多: %s", body)
+	}
+}
+
+// offset 写错要明确拒绝，不能当成 0 悄悄返回第一页——
+// 翻页客户端会因此把第一页当成第 N 页，然后无限循环。
+func TestWatchStatusRejectsBadOffset(t *testing.T) {
+	_, h := mkServer(t, nil)
+	for _, bad := range []string{"abc", "-1"} {
+		resp, body := get(t, h, "/api/v1/watch/status?offset="+bad, nil)
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "invalid_offset") {
+			t.Fatalf("offset=%s 应 400，实际 %d: %s", bad, resp.StatusCode, body)
+		}
+	}
+}

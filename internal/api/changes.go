@@ -20,7 +20,14 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_limit", err.Error())
 		return
 	}
-	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	// since 写错不能当成 0 静默放过：`since=abc` 被当成「从头拉」，
+	// 调用方用它做增量同步时会以为「这些全是新的」，把早先的变更重复处理一遍。
+	// limit 超出上限都返回 400 了，since 解析失败更没理由装作无事。
+	since, sinceErr := parseSince(r.URL.Query().Get("since"))
+	if sinceErr != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_since", sinceErr.Error())
+		return
+	}
 
 	var out []watch.Change
 	err = s.svc.Store().ListChanges(limit, func(raw []byte) (bool, error) {
@@ -115,6 +122,22 @@ func kindWord(kind string) string {
 	default:
 		return "变更"
 	}
+}
+
+// parseSince 解析增量游标（Unix 秒），空值表示不限制。
+func parseSince(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("since 必须是 Unix 时间戳（秒），收到 %q", raw)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("since 不能为负数")
+	}
+	return n, nil
 }
 
 func dash(s string) string {

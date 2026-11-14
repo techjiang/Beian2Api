@@ -41,6 +41,10 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	dir := filepath.Join(s.cfg.DataDir, "backups")
 	dst := filepath.Join(dir, name)
 
+	// 在线备份要在一个读事务里把整个数据文件写到磁盘。数据文件几百 MB 时
+	// 这一步必然超过 30 秒的 WriteTimeout，结果是备份成功、响应被掐断，
+	// 调用方（含 CLI 的 `backup -server`）看到的是「连接失败」。
+	defer extendWriteDeadline(w, 10*time.Minute)()
 	if err := s.svc.Store().Snapshot(dst); err != nil {
 		writeErr(w, http.StatusInternalServerError, "backup_failed", err.Error())
 		return

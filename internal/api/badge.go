@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/asoe/beian2api/internal/model"
 	"github.com/asoe/beian2api/internal/service"
 )
 
@@ -28,7 +29,12 @@ func (s *Server) handleBadge(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		value, color = "error", "#ef4444"
 	case res.Found && len(res.Records) > 0:
-		value, color = res.Records[0].ICPCode, "#10b981"
+		// 与巡检/历史用同一条代表记录：一个域名有多条备案时，
+		// 徽章显示哪条、巡检比对哪条必须是同一个答案。
+		if p, ok := model.Primary(res.Records); ok {
+			value = p.ICPCode
+		}
+		color = "#10b981"
 		if value == "" {
 			value, color = "已备案", "#10b981"
 		}

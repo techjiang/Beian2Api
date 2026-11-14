@@ -238,6 +238,14 @@ footer.foot .sp { margin-left: auto; }
   background: transparent; border: 1px solid var(--line); border-radius: 8px;
 }
 .row .drop:hover { color: var(--err); border-color: var(--err); filter: none; }
+/* 「展开更多」是列表的收尾动作，刻意做成整行、居中、虚线边：
+   它不该和每一行右侧那个「移出」长得一样——一个是列表级操作，一个是行级操作。 */
+.row-list + .more, .more {
+  margin: 10px 0 0; padding: 9px 12px; width: 100%; font-size: 13px; font-weight: 500;
+  color: var(--fg-mute); background: transparent; border: 1px dashed var(--line);
+  border-radius: 10px; cursor: pointer; font-family: inherit;
+}
+.more:hover { color: var(--fg); border-color: var(--brand); background: transparent; filter: none; }
 .chg { padding: 10px 2px; border-top: 1px solid var(--line); font-size: 14px; }
 .chg:first-child { border-top: 0; }
 .chg-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }

@@ -259,3 +259,28 @@ func TestSingleflightLeaderCancelDoesNotPoisonFollowers(t *testing.T) {
 		t.Fatalf("合并后上游只应被调用一次，实际 %d", n)
 	}
 }
+
+// 多站点域名：历史快照的代表记录要稳定，且顺序变化不算变更。
+func TestRecordHistoryPrimaryIsStable(t *testing.T) {
+	multi := []model.Record{rec("粤ICP备1号-3"), rec("粤ICP备1号-1")}
+	s := &stub{recs: multi}
+	svc, st := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	// 上游把顺序倒过来（内容没变），不该再追加一条历史。
+	s.recs = []model.Record{multi[1], multi[0]}
+	if _, err := svc.Query(context.Background(), "example.com", Options{Refresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	hist, err := st.History("example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 1 {
+		t.Fatalf("顺序变化不该产生新快照，实际 %d 条", len(hist))
+	}
+	if hist[0].ICPCode != "粤ICP备1号-1" {
+		t.Fatalf("应记录站点序号最小的那条，实际 %s", hist[0].ICPCode)
+	}
+}

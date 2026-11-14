@@ -180,6 +180,42 @@ func IsValidDomain(d string) bool {
 	return true
 }
 
+// Primary 从同一域名的多条备案记录里挑出「代表记录」。
+//
+// 一个主体下可以有多个网站，上游会一次返回多条。缓存哪种顺序、巡检比对
+// 哪一条、徽章显示哪一条，必须是同一个答案，否则：
+//   - 历史快照按「站点序号最小」记，巡检却拿 Records[0] 比对，
+//     真正发生变更时 diff 会凭空多出一行「备案号 -1 → -3」；
+//   - 上游返回顺序一变（同一域名两次请求列出顺序不同），巡检就会
+//     报一条根本不存在的变更。
+//
+// 所以这里把选择规则收在一处：站点序号最小的那条优先，序号不可比较时
+// 保持原顺序（上游给的顺序），保证结果稳定、可复现。
+func Primary(recs []Record) (Record, bool) {
+	if len(recs) == 0 {
+		return Record{}, false
+	}
+	best := recs[0]
+	for _, r := range recs[1:] {
+		if siteSeqLess(r.ICPCode, best.ICPCode) {
+			best = r
+		}
+	}
+	return best, true
+}
+
+// siteSeqLess 判断 a 的站点序号是否小于 b；任一无法解析时返回 false（不交换）。
+func siteSeqLess(a, b string) bool {
+	sa, sb := SiteSeq(a), SiteSeq(b)
+	if sa == "" || sb == "" {
+		return false
+	}
+	if len(sa) != len(sb) {
+		return len(sa) < len(sb)
+	}
+	return sa < sb
+}
+
 // Result 是一次查询的完整产出。
 type Result struct {
 	Domain    string   `json:"domain"`

@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/asoe/beian2api/internal/icpcode"
+	"github.com/asoe/beian2api/internal/model"
 	"github.com/asoe/beian2api/internal/service"
 )
 
@@ -31,7 +32,8 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		} else if !res.Found || len(res.Records) == 0 {
 			crossCheck = map[string]any{"checked": true, "match": false, "reason": "该域名没有备案记录"}
 		} else {
-			actual := res.Records[0].ICPCode
+			p, _ := model.Primary(res.Records)
+			actual := p.ICPCode
 			crossCheck = map[string]any{
 				"checked":  true,
 				"match":    icpcode.Same(info.Normalized, actual),

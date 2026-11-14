@@ -183,13 +183,11 @@ func (s *Service) recordHistory(domain string, recs []model.Record) {
 	if len(recs) == 0 {
 		return
 	}
-	// 一个域名可能对应多条备案（主体下多个网站），取站点序号最小的那条作为主记录，
-	// 这样历史快照的对比基准是稳定的。
-	cur := recs[0]
-	for _, r := range recs[1:] {
-		if seqLess(r.ICPCode, cur.ICPCode) {
-			cur = r
-		}
+	// 一个域名可能对应多条备案（主体下多个网站），代表记录的选择规则
+	// 收敛在 model.Primary：巡检、徽章、历史必须挑同一条，否则 diff 会凭空多出差异。
+	cur, ok := model.Primary(recs)
+	if !ok {
+		return
 	}
 	hist, _ := s.st.History(domain, 1)
 	if len(hist) > 0 && hist[len(hist)-1].Fingerprint() == cur.Fingerprint() {
@@ -282,18 +280,6 @@ func DiffRecords(a, b *model.Record) []FieldChange {
 		}
 	}
 	return out
-}
-
-// seqLess 判断 a 的站点序号是否小于 b；无法比较时保持原顺序。
-func seqLess(a, b string) bool {
-	sa, sb := model.SiteSeq(a), model.SiteSeq(b)
-	if sa == "" || sb == "" {
-		return false
-	}
-	if len(sa) != len(sb) {
-		return len(sa) < len(sb)
-	}
-	return sa < sb
 }
 
 func ms(start time.Time) float64 {

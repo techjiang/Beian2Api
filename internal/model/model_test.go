@@ -99,3 +99,33 @@ func TestSiteSeq(t *testing.T) {
 		}
 	}
 }
+
+// 同一域名的多条备案记录，代表记录的挑选必须唯一且稳定：
+// 历史、巡检、徽章、校验走的是同一条，否则 diff 会凭空多出差异。
+func TestPrimaryPicksSmallestSiteSeq(t *testing.T) {
+	recs := []Record{
+		{Domain: "a.com", ICPCode: "粤B2-20090059-5", UnitName: "示例"},
+		{Domain: "a.com", ICPCode: "粤ICP备12345678号-1", UnitName: "示例"},
+		{Domain: "a.com", ICPCode: "粤ICP备12345678号-3", UnitName: "示例"},
+	}
+	got, ok := Primary(recs)
+	if !ok || got.ICPCode != "粤ICP备12345678号-1" {
+		t.Fatalf("应取站点序号最小的那条，实际 %+v", got)
+	}
+	// 顺序打乱后结果不变：上游列出顺序不稳定时不能报出「假变更」。
+	shuffled := []Record{recs[2], recs[1], recs[0]}
+	if again, _ := Primary(shuffled); again.ICPCode != got.ICPCode {
+		t.Fatalf("结果应稳定，实际 %s", again.ICPCode)
+	}
+	if _, ok := Primary(nil); ok {
+		t.Fatal("空列表不该有代表记录")
+	}
+}
+
+// 站点序号不可解析时保持原顺序（不因为「没人能比」而随手换一条）。
+func TestPrimaryKeepsOrderWhenSeqUnparsable(t *testing.T) {
+	recs := []Record{{ICPCode: ""}, {ICPCode: "京ICP备1号-1"}}
+	if got, _ := Primary(recs); got.ICPCode != "" {
+		t.Fatalf("无法比较时应保持原顺序，实际 %+v", got)
+	}
+}

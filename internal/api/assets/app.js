@@ -1,4 +1,22 @@
 /* Beian2API 前端：原生 JS，无依赖，约 4KB。 */
+
+/* ---- 两个 IIFE 共用的小工具 ----
+   页面拆成「查询台」和「备案号校验器」两块各自独立初始化，但两者都要
+   带 API Key 请求。这些函数必须在两者之外定义，否则后一个块调前者块里的
+   局部函数会直接 ReferenceError（这正是校验器坏了这么久的原因）。 */
+var b2aKey = (function () {
+  var STORE = 'beian2api.key';
+  return function () {
+    try { return localStorage.getItem(STORE) || ''; } catch (e) { return ''; }
+  };
+})();
+
+function withKey(path) {
+  var k = b2aKey();
+  if (!k) return path;
+  return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'key=' + encodeURIComponent(k);
+}
+
 (function () {
   'use strict';
   var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -13,18 +31,13 @@
   function num(n) { return (n == null ? 0 : n).toLocaleString('zh-CN'); }
 
   /* ---- API Key ----
-     开了 auth 的部署，所有 /api 接口都要 Key。之前网页上没有任何地方能填，
-     首页于是整片报「缺少或无效的 API Key」——配了鉴权就没法用网页了。
-     Key 存在 localStorage，随请求带在 ?key= 上；RSS 订阅链接也带上。 */
-  var KEY_STORE = 'beian2api.key';
-  function apiKey() {
-    try { return localStorage.getItem(KEY_STORE) || ''; } catch (e) { return ''; }
-  }
-  function withKey(path) {
-    var k = apiKey();
-    if (!k) return path;
-    return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'key=' + encodeURIComponent(k);
-  }
+     Key 的读取与拼接放在文件最外层（见上面的 b2aKey / withKey），
+     因为备案号校验器是另一个 IIFE。之前 withKey 定义在这个 IIFE 里，
+     校验器里调它就抛 ReferenceError——点「校验」永远停在「校验中…」，
+     连错误提示都没有（异常发生在 fetch 之前，走不到 .catch）。 */
+  // apiKey 是本块内的短名字，实体在最外层。
+  function apiKey() { return b2aKey(); }
+
   function needKey() {
     var box = $('#keybox');
     if (!box) return;
@@ -295,57 +308,142 @@
     b.title = s.interval ? '每 ' + fmtDur(s.interval) + ' 巡检一轮' : '';
   }
 
+  /* 监控列表分页：首页每 60 秒轮询一次，域名上千时全量拉一遍只为渲染
+     屏幕上那十几行。默认先要 20 条，点「展开」再多要一页，
+     展开后的条数记在 wWant 里，轮询时按同样的条数刷新，
+     否则每次轮询都会把用户刚展开的列表收回去。 */
+  var wWant = 20, wShowAll = false;
+
+  function watchRow(it, box) {
+    var row = el('div', 'row');
+    var dom = el('div', 'dom');
+    var btn = el('button', null, it.domain);
+    btn.type = 'button';
+    btn.onclick = function () { input.value = it.domain; submit(); };
+    dom.appendChild(btn);
+    row.appendChild(dom);
+
+    var sub = el('div', 'sub', (it.changes ? it.changes + ' 次变更' : '暂无变更') + ' · 检查于 ' + when(it.checked_at));
+    row.appendChild(sub);
+    if (it.last_error) {
+      // 连续失败次数要写出来：显示「上游异常」但不告诉你挂了几轮，
+      // 就没法判断是一次抖动还是已经挂了一整天。
+      var b = el('span', 'badge err', it.fail_streak > 1 ? '连续 ' + it.fail_streak + ' 轮失败' : '上游异常');
+      b.title = it.last_error;
+      row.appendChild(b);
+    } else if (it.last_icp) {
+      row.appendChild(el('span', 'badge', it.last_icp));
+    } else if (it.last_fp) {
+      var nb = el('span', 'badge warn', '无备案');
+      nb.title = '上一次巡检时未查到备案记录';
+      row.appendChild(nb);
+    }
+
+    var grow = el('div', 'grow');
+    var del = el('button', 'drop', '移出');
+    del.type = 'button';
+    del.onclick = function () {
+      api('/api/v1/watch?domain=' + encodeURIComponent(it.domain), { method: 'DELETE' })
+        .then(loadWatch)
+        .catch(function (e) { del.textContent = '失败'; del.title = e.message; });
+    };
+    grow.appendChild(del);
+    row.appendChild(grow);
+    box.appendChild(row);
+  }
+
+  /* 监控列表分页：首页每 60 秒轮询一次，域名上千时接口全量返回是纯浪费——
+     屏幕上就那十几行。服务端默认给 20 条 + 总数，点「展开」再多要 50 条。
+     用 offset 逐页取，是因为服务端单页上限 200：一千个域名时要翻五页，
+     光靠调大 limit 到不了。 */
+  var wWant = 20, wShowAll = false;
+
+  function watchRow(it, box) {
+    var row = el('div', 'row');
+    var dom = el('div', 'dom');
+    var btn = el('button', null, it.domain);
+    btn.type = 'button';
+    btn.onclick = function () { input.value = it.domain; submit(); };
+    dom.appendChild(btn);
+    row.appendChild(dom);
+
+    var sub = el('div', 'sub', (it.changes ? it.changes + ' 次变更' : '暂无变更') + ' · 检查于 ' + when(it.checked_at));
+    row.appendChild(sub);
+    if (it.last_error) {
+      // 连续失败次数要写出来：显示「上游异常」但不告诉你挂了几轮，
+      // 就没法判断是一次抖动还是已经挂了一整天。
+      var b = el('span', 'badge err', it.fail_streak > 1 ? '连续 ' + it.fail_streak + ' 轮失败' : '上游异常');
+      b.title = it.last_error;
+      row.appendChild(b);
+    } else if (it.last_icp) {
+      row.appendChild(el('span', 'badge', it.last_icp));
+    } else if (it.last_fp) {
+      var nb = el('span', 'badge warn', '无备案');
+      nb.title = '上一次巡检时未查到备案记录';
+      row.appendChild(nb);
+    }
+
+    var grow = el('div', 'grow');
+    var del = el('button', 'drop', '移出');
+    del.type = 'button';
+    del.onclick = function () {
+      api('/api/v1/watch?domain=' + encodeURIComponent(it.domain), { method: 'DELETE' })
+        .then(loadWatch)
+        .catch(function (e) { del.textContent = '失败'; del.title = e.message; });
+    };
+    grow.appendChild(del);
+    row.appendChild(grow);
+    box.appendChild(row);
+  }
+
+  /* fetchWatch 按需翻页，凑够 want 条（want=0 表示全要）后回调。 */
+  function fetchWatch(want, cb, fail) {
+    var items = [], offset = 0, meta = null;
+    function step() {
+      var limit = 200;
+      if (want > 0) limit = Math.min(200, Math.max(1, want - items.length));
+      api('/api/v1/watch/status?offset=' + offset + '&limit=' + limit).then(function (d) {
+        if (!meta) meta = d;
+        items = items.concat(d.items || []);
+        offset += (d.items || []).length;
+        var needMore = (want === 0 || items.length < want) && d.has_more && (d.items || []).length > 0;
+        if (needMore) { step(); return; }
+        meta.loaded = items.length;
+        cb(items, meta);
+      }).catch(fail);
+    }
+    step();
+  }
+
   function loadWatch() {
     if (!wList) return;
-    api('/api/v1/watch/status').then(function (d) {
+    fetchWatch(wShowAll ? 0 : wWant, function (items, d) {
       lastStatus = d;
-      $('#w-total').textContent = d.total + ' 个';
+      $('#w-total').textContent = num(d.total) + ' 个';
       rhythm(d);
       wList.innerHTML = '';
-      if (!d.items || !d.items.length) {
+      if (!items.length) {
         wList.appendChild(el('div', 'hint small-hint', '还没有监控域名。查询到结果后点「加入监控」，备案变更会推送给你。'));
         return;
       }
       var box = el('div', 'row-list');
-      d.items.forEach(function (it) {
-        var row = el('div', 'row');
-        var dom = el('div', 'dom');
-        var btn = el('button', null, it.domain);
-        btn.type = 'button';
-        btn.onclick = function () { input.value = it.domain; submit(); };
-        dom.appendChild(btn);
-        row.appendChild(dom);
-
-        var sub = el('div', 'sub', (it.changes ? it.changes + ' 次变更' : '暂无变更') + ' · 检查于 ' + when(it.checked_at));
-        row.appendChild(sub);
-        if (it.last_error) {
-          // 连续失败次数要写出来：显示「上游异常」但不告诉你挂了几轮，
-          // 就没法判断是一次抖动还是已经挂了一整天。
-          var b = el('span', 'badge err', it.fail_streak > 1 ? '连续 ' + it.fail_streak + ' 轮失败' : '上游异常');
-          b.title = it.last_error;
-          row.appendChild(b);
-        } else if (it.last_icp) {
-          row.appendChild(el('span', 'badge', it.last_icp));
-        } else if (it.last_fp) {
-          var nb = el('span', 'badge warn', '无备案');
-          nb.title = '上一次巡检时未查到备案记录';
-          row.appendChild(nb);
-        }
-
-        var grow = el('div', 'grow');
-        var del = el('button', 'drop', '移出');
-        del.type = 'button';
-        del.onclick = function () {
-          api('/api/v1/watch?domain=' + encodeURIComponent(it.domain), { method: 'DELETE' })
-            .then(loadWatch)
-            .catch(function (e) { del.textContent = '失败'; del.title = e.message; });
-        };
-        grow.appendChild(del);
-        row.appendChild(grow);
-        box.appendChild(row);
-      });
+      items.forEach(function (it) { watchRow(it, box); });
       wList.appendChild(box);
-    }).catch(function (e) {
+      var left = d.total - items.length;
+      if (left > 0) {
+        // 剩多少要写出来：只说「加载更多」，用户不知道点下去还要点几次。
+        var more = el('button', 'ghost small more', '展开更多（还有 ' + num(left) + ' 个）');
+        more.type = 'button';
+        more.onclick = function () {
+          more.disabled = true;
+          more.textContent = '加载中…';
+          wWant = items.length + 50;
+          if (wWant >= d.total) wShowAll = true;
+          loadWatch();
+        };
+        wList.appendChild(more);
+      }
+    }, function (e) {
       wList.innerHTML = '';
       wList.appendChild(el('div', 'err-box', '监控列表读取失败：' + e.message));
     });
@@ -652,22 +750,32 @@
     box.appendChild(card);
   }
 
+  function showFail(msg) {
+    box.innerHTML = '';
+    var d = document.createElement('div');
+    d.className = 'err-box'; d.textContent = msg || '校验失败';
+    box.appendChild(d);
+  }
+
   form.addEventListener('submit', function (e) {
     e.preventDefault();
     var v = input.value.trim();
     if (!v) return;
     box.innerHTML = '<div class="hint">校验中…</div>';
-    fetch(withKey('/api/v1/verify?code=' + encodeURIComponent(v)))
-      .then(function (r) { return r.json(); })
+    // 同步异常（比如拼接 URL 时出错）不能让它停在「校验中…」：
+    // 那是界面上最糟的一种状态——既没说成功，也没说失败，用户只能干等。
+    var req;
+    try {
+      req = fetch(withKey('/api/v1/verify?code=' + encodeURIComponent(v)));
+    } catch (err) {
+      showFail(err && err.message ? err.message : String(err));
+      return;
+    }
+    req.then(function (r) { return r.json(); })
       .then(function (j) {
         if (!j.ok) throw new Error((j.error && j.error.message) || '校验失败');
         render(j.data);
       })
-      .catch(function (err) {
-        box.innerHTML = '';
-        var d = document.createElement('div');
-        d.className = 'err-box'; d.textContent = err.message;
-        box.appendChild(d);
-      });
+      .catch(function (err) { showFail(err.message); });
   });
 })();
