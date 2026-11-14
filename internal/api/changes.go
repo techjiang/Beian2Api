@@ -98,6 +98,10 @@ func kindWord(kind string) string {
 		return "注销"
 	case "registered":
 		return "新增"
+	case "upstream_error":
+		return "上游异常"
+	case "recovered":
+		return "已恢复"
 	default:
 		return "变更"
 	}

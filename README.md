@@ -122,7 +122,7 @@ curl "http://localhost:8080/api/v1/query?domain=example.com"
 | GET | `/api/v1/watch/list` | 巡检列表 |
 | GET | `/api/v1/watch/status` | 巡检运行概况（是否在跑 / 上次 / 下次） |
 | POST | `/api/v1/watch/run` | 立即执行一轮巡检 |
-| GET | `/api/v1/changes` | 变更事件流水 |
+| GET | `/api/v1/changes` | 变更事件流水（含注销、上游异常、恢复） |
 | GET | `/api/v1/changes.rss` | 变更事件 RSS |
 | GET/POST | `/api/v1/admin/backup` | 在线生成一致性快照 |
 | GET | `/badge/icp.svg` | SVG 徽章，可直接放进 README |
@@ -178,7 +178,7 @@ notify:
       kind: dingtalk                      # 留空按 URL 自动识别
       url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
       secret: ""                          # 机器人开了加签就填这里
-      events: [changed, revoked, registered]   # 省略即全推
+      events: [changed, revoked, registered, upstream_error, recovered]   # 省略即全推
 
     - name: 飞书
       url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
@@ -211,9 +211,17 @@ curl -X POST localhost:8080/api/v1/notify/test
 
 不想配推送就用 RSS：`/api/v1/changes.rss`。
 
-三类事件都会报：备案信息变了（`changed`）、之前有备案现在查不到了（`revoked`，多半是被注销）、
-之前没备案现在有了（`registered`）。巡检间隔改了或服务重启了都不会重置节奏——
-首轮时机按「上次巡检时间 + 间隔」推算，不会因为你重启服务就额外打一轮上游。
+会报的事件有五类：
+
+- `changed` 备案信息变了
+- `revoked` 之前有备案、现在查不到（多半被注销）
+- `registered` 之前没备案、现在有了
+- `upstream_error` 连续多轮查不到。这比变更更急——你根本不知道它现在是死是活。
+  默认连续 3 轮才报（`watch.fail_threshold`），偶发抖动不会刷屏；报过就不再重复报。
+- `recovered` 从故障里恢复。没有它，群里最后一条消息会永远停在「挂了」。
+
+巡检间隔改了或服务重启了都不会重置节奏——首轮时机按「上次巡检时间 + 间隔」推算，
+不会因为你重启服务就额外打一轮上游。
 
 首页的监控面板会显示「上次 12 分钟前 · 下次 6 小时后」，也可以直接调 `/api/v1/watch/status`。
 推送通道的最近状态在同一页的「推送通道」面板里，`/api/v1/notify/status` 是它的数据源。
@@ -241,10 +249,22 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_NOTIFY_CHANNELS` | 空 | 多通道推送，形如 `dingtalk:<url>,wecom:<url>` |
 | `BEIAN2API_WATCH_INTERVAL` | `86400` | 巡检间隔，支持 `30m` / `6h` / 秒数 |
 | `BEIAN2API_WATCH_ENABLED` | `true` | 是否启用自动巡检 |
+| `BEIAN2API_WATCH_FAIL_THRESHOLD` | `3` | 连续几轮查不到才推送「上游异常」 |
+| `BEIAN2API_TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` / `X-Real-IP` |
 
 ### 反向代理
 
 `deploy/` 里有现成的 `Caddyfile` 和 `nginx.conf`，都已处理好真实 IP 透传。
+
+**但服务端默认不信任这些头**，跑在反代后面必须显式打开：
+
+```yaml
+trust_proxy: true
+```
+
+原因是 `X-Forwarded-For` 客户端能随便填。无条件采信它，限流的 key 就交给攻击者自己选——
+每个请求换个头就换一桶令牌，限流形同虚设。默认关闭时，请求按 TCP 对端地址分桶；
+在线备份接口在未配 API Key 时也只认真正的回环直连。
 
 ### 数据与备份
 

@@ -254,7 +254,9 @@
         var sub = el('div', 'sub', (it.changes ? it.changes + ' 次变更' : '暂无变更') + ' · 检查于 ' + when(it.checked_at));
         row.appendChild(sub);
         if (it.last_error) {
-          var b = el('span', 'badge err', '上游异常');
+          // 连续失败次数要写出来：显示「上游异常」但不告诉你挂了几轮，
+          // 就没法判断是一次抖动还是已经挂了一整天。
+          var b = el('span', 'badge err', it.fail_streak > 1 ? '连续 ' + it.fail_streak + ' 轮失败' : '上游异常');
           b.title = it.last_error;
           row.appendChild(b);
         } else if (it.last_icp) {
@@ -287,7 +289,7 @@
   function loadChanges() {
     if (!cList) return;
     api('/api/v1/changes?limit=10').then(function (d) {
-      $('#c-total').textContent = d.total + ' 条';
+      $('#c-total').textContent = d.total >= 10 ? '最近 10 条' : d.total + ' 条';
       cList.innerHTML = '';
       if (!d.items || !d.items.length) {
         cList.appendChild(el('div', 'hint small-hint', '暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。'));
@@ -303,6 +305,8 @@
         head.appendChild(domBtn);
         if (c.kind === 'revoked') head.appendChild(el('span', 'badge err', '注销'));
         else if (c.kind === 'registered') head.appendChild(el('span', 'badge', '新增'));
+        else if (c.kind === 'upstream_error') head.appendChild(el('span', 'badge err', '上游异常'));
+        else if (c.kind === 'recovered') head.appendChild(el('span', 'badge', '已恢复'));
         if (c.icp_code) head.appendChild(el('span', 'badge', c.icp_code));
         head.appendChild(el('span', 'when', when(c.at)));
         box.appendChild(head);
@@ -416,6 +420,13 @@
 
   // 「上次 / 下次」是相对时间，隔一段时间自己走一走，不用重新拉列表。
   setInterval(function () { rhythm(lastStatus); }, 30000);
+
+  // 面板要自己长出来：页面开着不动，巡检跑完了变更却还停在旧内容，
+  // 「改了会通知」这件事在网页上就等于没发生。标签页不可见时不拉，省流量。
+  setInterval(function () {
+    if (document.hidden) return;
+    loadWatch(); loadChanges(); loadNotify();
+  }, 60000);
 
   loadWatch();
   loadChanges();

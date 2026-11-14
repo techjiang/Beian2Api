@@ -131,7 +131,8 @@ curl -X POST "http://localhost:8080/api/v1/batch" \
 }
 ```
 
-同一天内同一域名只保留最新一条，避免快照无限膨胀。
+每次内容变化都会留一条快照，同一时刻重复写入则覆盖。按天合并会让「一天内改了两次」
+只剩最后一版，中间那次变更连同它的 diff 就永久丢了。
 
 ---
 
@@ -259,7 +260,9 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
       "checked_at": 1735776000,
       "last_fp": "dd7de4d5e0ddbed4d790474841a524bb",
       "last_icp": "京ICP备12345678号-1",
-      "changes": 1
+      "changes": 1,
+      "fail_streak": 0,
+      "last_ok_at": 1735776000
     }]
   }
 }
@@ -297,6 +300,16 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 - `changed` — 备案信息本身变了
 - `revoked` — 之前有备案，现在查不到了（域名可能被注销）
 - `registered` — 之前没有备案，现在有了
+- `upstream_error` — 连续多轮回源失败（默认 3 轮，见 `watch.fail_threshold`）。
+  这比备案变更更急：你不知道这个域名现在是死是活。同一次故障只报一次。
+- `recovered` — 从上一类故障中恢复。没有它，通知里最后一条会永远停在「挂了」。
+
+`upstream_error` 的 `diff` 形如：
+
+```json
+[{ "field": "查询状态", "from": "正常", "to": "连续 3 轮失败" },
+ { "field": "失败原因", "from": "", "to": "上游数据源均不可用（miit: 401）" }]
+```
 
 | 参数 | 说明 |
 | --- | --- |
@@ -322,7 +335,7 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
     "channels": [{
       "name": "运维群",
       "kind": "dingtalk",
-      "events": ["changed", "revoked", "registered"],
+      "events": ["changed", "revoked", "registered", "upstream_error", "recovered"],
       "last_at": 1735776000,
       "last_ok": true,
       "ok": 12,

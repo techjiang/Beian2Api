@@ -105,7 +105,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if s.cfg.LogLevel == "debug" || (s.cfg.LogLevel == "info" && strings.HasPrefix(r.URL.Path, "/api/")) {
 			s.log.Debug("http",
 				"method", r.Method, "path", r.URL.Path, "status", sw.code,
-				"ms", float64(time.Since(start).Microseconds())/1000, "ip", clientIP(r))
+				"ms", float64(time.Since(start).Microseconds())/1000, "ip", s.clientIP(r))
 		}
 	})
 }

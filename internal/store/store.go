@@ -50,6 +50,12 @@ type WatchItem struct {
 	LastICP   string `json:"last_icp"`
 	Changes   int    `json:"changes"`
 	LastError string `json:"last_error,omitempty"`
+	// FailStreak 是连续回源失败次数，Alerted 表示已经为这轮故障推送过告警。
+	// 分开记是因为「连续失败」和「已经通知过」不是一回事：前者决定要不要报，
+	// 后者决定有没有报过——否则每轮巡检都会往群里灌一条同样的消息。
+	FailStreak int   `json:"fail_streak,omitempty"`
+	Alerted    bool  `json:"alerted,omitempty"`
+	LastOKAt   int64 `json:"last_ok_at,omitempty"`
 }
 
 // Store 是对 bbolt 的薄封装，负责序列化与索引。
@@ -137,10 +143,18 @@ func (s *Store) DeleteCache(domain string) error {
 	})
 }
 
-// appendHistory 追加一条历史快照（同日同域名覆盖，避免膨胀）。
+// AppendHistory 追加一条历史快照。
+//
+// key 里带天 + 时间戳 + 指纹前缀：只用「域名+天」会互相覆盖——
+// 同一天里备案改了两次，第一次的快照会被第二次顶掉，历史里就只剩最后一版，
+// 期间那次变更（以及它的 diff）永久丢失。这是只有一天多改几次才会踩到的坑。
 func (s *Store) AppendHistory(r model.Record) error {
 	day := time.Unix(r.FetchedAt, 0).Format("20060102")
-	key := []byte(fmt.Sprintf("%s\x00%s", r.Domain, day))
+	fp := r.Fingerprint()
+	if len(fp) > 12 {
+		fp = fp[:12]
+	}
+	key := []byte(fmt.Sprintf("%s\x00%s\x00%020d\x00%s", r.Domain, day, r.FetchedAt, fp))
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err

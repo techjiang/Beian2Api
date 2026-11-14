@@ -75,6 +75,10 @@ func kindWord(kind string) string {
 		return "注销"
 	case EventRegistered:
 		return "新增"
+	case EventUpstreamError:
+		return "上游异常"
+	case EventRecovered:
+		return "已恢复"
 	case EventTest:
 		return "测试"
 	default:
@@ -99,7 +103,14 @@ func lines(ev Event) []string {
 		out = append(out, fmt.Sprintf("%s：%s → %s", d.Field, dash(d.From), dash(d.To)))
 	}
 	if len(ev.Diff) == 0 && ev.ICPCode == "" {
-		out = append(out, "备案状态发生变化")
+		switch ev.Kind {
+		case EventUpstreamError:
+			out = append(out, "该域名已连续多轮无法回源查询")
+		case EventRecovered:
+			out = append(out, "上游已恢复，域名可正常查询")
+		default:
+			out = append(out, "备案状态发生变化")
+		}
 	}
 	if ev.BaseURL != "" && ev.Domain != "" && ev.Kind != EventTest {
 		out = append(out, "详情："+strings.TrimRight(ev.BaseURL, "/")+"/?domain="+ev.Domain)
@@ -144,8 +155,10 @@ func feishuTemplate(kind string) string {
 	switch kind {
 	case EventRevoked:
 		return "red"
-	case EventRegistered:
+	case EventRegistered, EventRecovered:
 		return "green"
+	case EventUpstreamError:
+		return "red"
 	case EventTest:
 		return "grey"
 	default:

@@ -406,3 +406,101 @@ func TestDispatchDoesNotBlock(t *testing.T) {
 		t.Fatal("推送阻塞了巡检主流程")
 	}
 }
+
+// 上游连续失败要在第 N 轮报一次，恢复时再报一次，中间不重复刷屏。
+func TestUpstreamErrorAlertAndRecover(t *testing.T) {
+	w, st, sb := setup(t)
+	w.WithFailThreshold(3)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	w.RunOnce(context.Background()) // 建立基线
+
+	sb.err = errors.New("dial tcp: i/o timeout")
+	for i := 1; i <= 2; i++ {
+		if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+			t.Fatalf("第 %d 轮未到阈值，不应告警，实际 %d 条", i, len(ch))
+		}
+	}
+	ch := w.RunOnce(context.Background())
+	if len(ch) != 1 || ch[0].Kind != EventUpstreamError {
+		t.Fatalf("连续 3 轮失败应告警 1 次，实际 %+v", ch)
+	}
+	// 继续失败也不能每轮都报
+	for i := 0; i < 3; i++ {
+		if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+			t.Fatalf("已告警过不应重复推送，实际 %d 条", len(ch))
+		}
+	}
+
+	sb.err = nil
+	ch = w.RunOnce(context.Background())
+	if len(ch) != 1 || ch[0].Kind != EventRecovered {
+		t.Fatalf("恢复应报 1 次，实际 %+v", ch)
+	}
+	if ch := w.RunOnce(context.Background()); len(ch) != 0 {
+		t.Fatalf("恢复后不应重复报，实际 %d 条", len(ch))
+	}
+	item, _ := st.GetWatch("example.com")
+	if item.FailStreak != 0 || item.Alerted || item.LastError != "" {
+		t.Fatalf("恢复后状态应清零: %+v", item)
+	}
+}
+
+// 恢复的同时备案也变了：只报一条变更，且带上「已恢复」这一层。
+func TestRecoveredWithChange(t *testing.T) {
+	w, st, sb := setup(t)
+	w.WithFailThreshold(1)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	w.RunOnce(context.Background())
+
+	sb.err = errors.New("boom")
+	if ch := w.RunOnce(context.Background()); len(ch) != 1 || ch[0].Kind != EventUpstreamError {
+		t.Fatalf("应报上游异常，实际 %+v", ch)
+	}
+	sb.err = nil
+	sb.recs = []model.Record{normalize("京ICP备7号-1", "示例公司")}
+	ch := w.RunOnce(context.Background())
+	if len(ch) != 1 || ch[0].Kind != "changed" {
+		t.Fatalf("恢复+变更应只报一条变更，实际 %+v", ch)
+	}
+	found := false
+	for _, d := range ch[0].Diff {
+		if d.Field == "查询状态" && d.To == "已恢复" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("变更里应带上恢复说明: %+v", ch[0].Diff)
+	}
+}
+
+// 上游全挂但本地有快照时，service 返回 stale 结果而不是错误。
+// 巡检不能把这当成「一切正常」，否则上游连着挂几周都没人知道。
+func TestStaleResultTreatedAsFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sb := &stub{recs: []model.Record{normalize("京ICP备1号-1", "示例公司")}}
+	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
+	w := New(svc, st, time.Hour, 1, nil, log).WithFailThreshold(1)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	w.RunOnce(context.Background()) // 建立基线并写入缓存
+
+	sb.err = errors.New("boom")
+	ch := w.RunOnce(context.Background())
+	if len(ch) != 1 || ch[0].Kind != EventUpstreamError {
+		t.Fatalf("stale 结果应算作上游异常，实际 %+v", ch)
+	}
+	item, _ := st.GetWatch("example.com")
+	if !strings.Contains(item.LastError, "快照") {
+		t.Fatalf("应记录快照回退原因: %q", item.LastError)
+	}
+}

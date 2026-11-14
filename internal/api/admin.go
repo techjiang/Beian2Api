@@ -23,7 +23,7 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 GET / POST")
 		return
 	}
-	if len(s.keys) == 0 && !isLoopback(r) {
+	if len(s.keys) == 0 && !s.isLoopback(r) {
 		writeErr(w, http.StatusForbidden, "forbidden",
 			"未配置 API Key 时，备份接口仅允许本机访问")
 		return
@@ -57,12 +57,12 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func isLoopback(r *http.Request) bool {
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		// 经过代理说明不是直连，不认。
+func (s *Server) isLoopback(r *http.Request) bool {
+	if !s.cfg.TrustProxy && r.Header.Get("X-Forwarded-For") != "" {
+		// 未声明可信代理时不采信任何转发头，宁可拒绝。
 		return false
 	}
-	host := clientIP(r)
+	host := s.clientIP(r)
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }

@@ -4,6 +4,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -23,6 +24,10 @@ type Watcher struct {
 	notifier *notify.Dispatcher
 	baseURL  string
 	log      Logger
+
+	// failThreshold 是「连续失败几轮才告警」的阈值。
+	// 设成 1 会被一次网络抖动刷屏，设太大又失去意义，3 轮是个能接受的手感。
+	failThreshold int
 
 	// runMu 串行化巡检：定时器和「立即巡检」按钮可能同时触发，
 	// 两轮并发跑会在同一份基线上互相覆盖，变更计数和变更流水都会重复。
@@ -46,6 +51,17 @@ type Watcher struct {
 // 上游说没有备案时直接 return，既不比对也不记录。
 const fpAbsent = "absent"
 
+// defaultFailThreshold 是连续失败告警的默认阈值。
+const defaultFailThreshold = 3
+
+// WithFailThreshold 覆盖连续失败告警阈值（<1 时回落到默认值）。
+func (w *Watcher) WithFailThreshold(n int) *Watcher {
+	if n > 0 {
+		w.failThreshold = n
+	}
+	return w
+}
+
 // Logger 是巡检日志所需的最小接口。
 type Logger interface {
 	Info(msg string, args ...any)
@@ -57,7 +73,7 @@ type Change struct {
 	Domain   string                `json:"domain"`
 	At       int64                 `json:"at"`
 	ICPCode  string                `json:"icp_code"`
-	Kind     string                `json:"kind"` // changed | revoked | registered
+	Kind     string                `json:"kind"` // changed | revoked | registered | upstream_error | recovered
 	Diff     []service.FieldChange `json:"diff"`
 	Previous *model.Record         `json:"previous,omitempty"`
 	Current  *model.Record         `json:"current,omitempty"`
@@ -73,7 +89,7 @@ func New(svc *service.Service, st *store.Store, interval time.Duration, workers 
 	}
 	return &Watcher{
 		svc: svc, st: st, interval: interval, workers: workers, notifier: notifier,
-		log: log, stop: make(chan struct{}),
+		log: log, stop: make(chan struct{}), failThreshold: defaultFailThreshold,
 	}
 }
 
@@ -198,6 +214,12 @@ func (w *Watcher) recordRun(n int) {
 	_ = w.st.SetStat(metaLastCount, int64(n))
 }
 
+// 事件类型别名：巡检产生的事件名要和推送层一致，否则通道的 events 订阅对不上。
+const (
+	EventUpstreamError = notify.EventUpstreamError
+	EventRecovered     = notify.EventRecovered
+)
+
 const (
 	metaLastRun   = "watch.last_run_at"
 	metaLastCount = "watch.last_count"
@@ -216,43 +238,66 @@ func (w *Watcher) check(ctx context.Context, it store.WatchItem) (Change, bool) 
 
 	res, err := w.svc.Query(cctx, it.Domain, service.Options{Refresh: true})
 	now := model.Now()
+	it.CheckedAt = now
+
 	if err != nil {
-		it.LastError = err.Error()
-		it.CheckedAt = now
-		_ = w.st.PutWatch(&it)
+		return w.onFailure(&it, err, now)
+	}
+	// 回源失败但本地有快照时，service 会返回 stale 结果而不是错误。
+	// 对查询方这是好事（不空），但对巡检是坏事：它会以为「一切正常」，
+	// 于是上游连着挂几周也没人知道——正是巡检该报的那一类事。
+	if res.Stale {
+		reason := "上游不可用，返回本地快照"
+		if res.Notice != "" {
+			reason = res.Notice
+		}
+		return w.onFailure(&it, errors.New(reason), now)
+	}
+	return w.onSuccess(&it, res, prev, now)
+}
+
+// onFailure 处理回源失败。
+//
+// 上游打不通本身就该通知：一个域名连续几轮查不到，比「备案号变了」更急——
+// 你根本不知道它现在是死是活。但不能一轮就报，偶发超时太常见，
+// 报多了只会把人训练成忽略通知。
+func (w *Watcher) onFailure(it *store.WatchItem, err error, now int64) (Change, bool) {
+	it.LastError = err.Error()
+	it.FailStreak++
+	defer func() { _ = w.st.PutWatch(it) }()
+
+	if it.FailStreak < w.failThreshold || it.Alerted {
+		// 还没到阈值，或者这轮故障已经报过了：不重复打扰。
 		return Change{}, false
 	}
-	it.CheckedAt = now
+	it.Alerted = true
+	ch := Change{
+		Domain: it.Domain, At: now, Kind: EventUpstreamError,
+		Diff: []service.FieldChange{
+			{Field: "查询状态", From: "正常", To: fmt.Sprintf("连续 %d 轮失败", it.FailStreak)},
+			{Field: "失败原因", From: "", To: it.LastError},
+		},
+	}
+	w.appendChange(ch)
+	return ch, true
+}
+
+// onSuccess 处理回源成功：先收尾故障状态，再做常规比对。
+//
+// 恢复必须报一次，否则群里最后一条消息永远停在「挂了」。
+// 如果恢复的同时备案内容也变了，只报一条「变更」——它已经包含了恢复这层含义。
+func (w *Watcher) onSuccess(it *store.WatchItem, res *model.Result, prev *model.Record, now int64) (Change, bool) {
+	recovered := it.Alerted
+	streak := it.FailStreak
+	it.FailStreak, it.Alerted = 0, false
 	it.LastError = ""
+	it.LastOKAt = now
+	_ = w.st.PutWatch(it)
 
 	// 上游明确答复"没有备案"也是一次真实的状态变化：域名可能被注销了。
 	// 这是备案巡检最该报出来的一种变更，之前直接 return 掉了。
 	if !res.Found || len(res.Records) == 0 {
-		if it.LastFP == "" {
-			// 首次巡检就没有备案：建立基线，不报警。
-			it.LastFP = fpAbsent
-			it.LastICP = ""
-			_ = w.st.PutWatch(&it)
-			return Change{}, false
-		}
-		if it.LastFP == fpAbsent {
-			_ = w.st.PutWatch(&it)
-			return Change{}, false
-		}
-		old := it.LastICP
-		it.LastFP = fpAbsent
-		it.LastICP = ""
-		it.Changes++
-		_ = w.st.PutWatch(&it)
-		ch := Change{
-			Domain: it.Domain, At: now, Kind: "revoked", Previous: prev,
-			Diff: []service.FieldChange{
-				{Field: "备案状态", From: "已备案" + withParen(old), To: "未查到备案（可能已注销）"},
-				{Field: "备案号", From: old, To: ""},
-			},
-		}
-		w.appendChange(ch)
-		return ch, true
+		return w.onAbsent(it, prev, recovered, streak, now)
 	}
 
 	cur := res.Records[0]
@@ -261,11 +306,14 @@ func (w *Watcher) check(ctx context.Context, it store.WatchItem) (Change, bool) 
 
 	if it.LastFP == "" {
 		it.LastFP = fp
-		_ = w.st.PutWatch(&it)
+		_ = w.st.PutWatch(it)
 		return Change{}, false
 	}
 	if it.LastFP == fp {
-		_ = w.st.PutWatch(&it)
+		_ = w.st.PutWatch(it)
+		if recovered {
+			return w.recoveredChange(it, streak, now)
+		}
 		return Change{}, false
 	}
 
@@ -275,13 +323,67 @@ func (w *Watcher) check(ctx context.Context, it store.WatchItem) (Change, bool) 
 	}
 	it.LastFP = fp
 	it.Changes++
-	_ = w.st.PutWatch(&it)
+	_ = w.st.PutWatch(it)
 
 	ch := Change{Domain: it.Domain, At: now, ICPCode: cur.ICPCode, Kind: kind, Current: &cur, Previous: prev}
 	if kind == "registered" || prev == nil {
 		ch.Diff = []service.FieldChange{{Field: "备案号", From: "", To: cur.ICPCode}}
 	} else {
 		ch.Diff = service.DiffRecords(prev, &cur)
+	}
+	if recovered {
+		ch.Diff = append(ch.Diff, service.FieldChange{
+			Field: "查询状态", From: fmt.Sprintf("连续 %d 轮失败", streak), To: "已恢复",
+		})
+	}
+	w.appendChange(ch)
+	return ch, true
+}
+
+// onAbsent 处理「上游明确说没有备案」。
+func (w *Watcher) onAbsent(it *store.WatchItem, prev *model.Record, recovered bool, streak int, now int64) (Change, bool) {
+	if it.LastFP == "" {
+		// 首次巡检就没有备案：建立基线，不报警。
+		it.LastFP = fpAbsent
+		it.LastICP = ""
+		_ = w.st.PutWatch(it)
+		return Change{}, false
+	}
+	if it.LastFP == fpAbsent {
+		_ = w.st.PutWatch(it)
+		if recovered {
+			return w.recoveredChange(it, streak, now)
+		}
+		return Change{}, false
+	}
+	old := it.LastICP
+	it.LastFP = fpAbsent
+	it.LastICP = ""
+	it.Changes++
+	_ = w.st.PutWatch(it)
+	ch := Change{
+		Domain: it.Domain, At: now, Kind: "revoked", Previous: prev,
+		Diff: []service.FieldChange{
+			{Field: "备案状态", From: "已备案" + withParen(old), To: "未查到备案（可能已注销）"},
+			{Field: "备案号", From: old, To: ""},
+		},
+	}
+	if recovered {
+		ch.Diff = append(ch.Diff, service.FieldChange{
+			Field: "查询状态", From: fmt.Sprintf("连续 %d 轮失败", streak), To: "已恢复",
+		})
+	}
+	w.appendChange(ch)
+	return ch, true
+}
+
+// recoveredChange 构造一条「上游恢复」事件。
+func (w *Watcher) recoveredChange(it *store.WatchItem, streak int, now int64) (Change, bool) {
+	ch := Change{
+		Domain: it.Domain, At: now, Kind: EventRecovered, ICPCode: it.LastICP,
+		Diff: []service.FieldChange{
+			{Field: "查询状态", From: fmt.Sprintf("连续 %d 轮失败", streak), To: "已恢复"},
+		},
 	}
 	w.appendChange(ch)
 	return ch, true
@@ -367,15 +469,4 @@ func (w *Watcher) setNext(ts int64) {
 	w.mu.Lock()
 	w.nextRun = ts
 	w.mu.Unlock()
-}
-
-func kindLabel(kind string) string {
-	switch kind {
-	case "revoked":
-		return "注销"
-	case "registered":
-		return "新增"
-	default:
-		return "变更"
-	}
 }

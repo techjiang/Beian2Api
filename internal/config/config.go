@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,12 @@ type Config struct {
 	DataDir  string `yaml:"data_dir" json:"data_dir"`
 	LogLevel string `yaml:"log_level" json:"log_level"`
 	BaseURL  string `yaml:"base_url" json:"base_url"`
+	// TrustProxy 为真时才采信 X-Forwarded-For / X-Real-IP。
+	//
+	// 默认关：这几个头是客户端随便填的，无条件采信等于把限流的 key
+	// 交给攻击者自己选——每个请求换个 X-Real-IP，就每个请求都拿到一桶新的令牌。
+	// 只有确实跑在反向代理后面时才该打开。
+	TrustProxy bool `yaml:"trust_proxy" json:"trust_proxy"`
 
 	Cache struct {
 		TTL      int `yaml:"ttl" json:"ttl"`             // 命中缓存有效期（秒）
@@ -47,10 +54,12 @@ type Config struct {
 	Providers []Provider `yaml:"providers" json:"providers"`
 
 	Watch struct {
-		Enabled  bool   `yaml:"enabled" json:"enabled"`
-		Interval int    `yaml:"interval" json:"interval"` // 秒
-		Workers  int    `yaml:"workers" json:"workers"`
-		Webhook  string `yaml:"webhook" json:"webhook"` // 兼容旧配置，等价于一个 generic 通道
+		Enabled  bool `yaml:"enabled" json:"enabled"`
+		Interval int  `yaml:"interval" json:"interval"` // 秒
+		Workers  int  `yaml:"workers" json:"workers"`
+		// FailThreshold 是「连续几轮回源失败才推送告警」，1 会被偶发抖动刷屏。
+		FailThreshold int    `yaml:"fail_threshold" json:"fail_threshold"`
+		Webhook       string `yaml:"webhook" json:"webhook"` // 兼容旧配置，等价于一个 generic 通道
 	} `yaml:"watch" json:"watch"`
 
 	Notify Notify `yaml:"notify" json:"notify"`
@@ -93,6 +102,7 @@ func Default() *Config {
 	c.Watch.Enabled = true
 	c.Watch.Interval = 86400
 	c.Watch.Workers = 4
+	c.Watch.FailThreshold = 3
 	c.Notify.Retries = 3
 	c.Providers = []Provider{
 		{Name: "miit", Enabled: true, Weight: 100, Timeout: 8},
@@ -141,6 +151,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("BEIAN2API_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
+	if v := os.Getenv("BEIAN2API_TRUST_PROXY"); v != "" {
+		c.TrustProxy = truthyEnv(v)
+	}
 	if v := os.Getenv("BEIAN2API_API_KEYS"); v != "" {
 		c.Auth.Enabled = true
 		c.Auth.Keys = splitList(v)
@@ -164,6 +177,11 @@ func (c *Config) applyEnv() {
 			c.Watch.Interval = int(d / time.Second)
 		}
 	}
+	if v := os.Getenv("BEIAN2API_WATCH_FAIL_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Watch.FailThreshold = n
+		}
+	}
 	if v := os.Getenv("BEIAN2API_WATCH_ENABLED"); v != "" {
 		c.Watch.Enabled = v == "1" || strings.EqualFold(v, "true")
 	}
@@ -172,6 +190,14 @@ func (c *Config) applyEnv() {
 			c.Cache.TTL = n
 		}
 	}
+}
+
+func truthyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	}
+	return false
 }
 
 func splitList(v string) []string {
@@ -197,6 +223,21 @@ func parseProviders(v string) []Provider {
 		}
 		out = append(out, Provider{Name: name, Enabled: w > 0, Weight: w, Timeout: 8})
 	}
+	return out
+}
+
+// knownEvents 是推送可订阅的事件全集，与 notify 包中的事件常量一一对应。
+var knownEvents = map[string]struct{}{
+	"changed": {}, "revoked": {}, "registered": {},
+	"upstream_error": {}, "recovered": {}, "test": {},
+}
+
+func eventNames() []string {
+	out := make([]string, 0, len(knownEvents))
+	for k := range knownEvents {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -226,6 +267,9 @@ func (c *Config) Validate() error {
 	if c.Watch.Workers <= 0 {
 		c.Watch.Workers = 4
 	}
+	if c.Watch.FailThreshold <= 0 {
+		c.Watch.FailThreshold = 3
+	}
 	if len(c.Providers) == 0 {
 		c.Providers = Default().Providers
 	}
@@ -244,6 +288,17 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("notify.channels[%d].url 必须是 http(s) 地址", i)
 		}
 		ch.Kind = strings.ToLower(strings.TrimSpace(ch.Kind))
+		// 事件名写错是最难发现的一类配置错误：不会报错，只会「永远不推送」。
+		// 有人把 upstream_error 写成 upstream-error，就一直收不到告警，
+		// 还以为是上游没问题。这里直接拒绝，并列出合法取值。
+		for j, ev := range ch.Events {
+			e := strings.ToLower(strings.TrimSpace(ev))
+			if _, ok := knownEvents[e]; !ok {
+				return fmt.Errorf("notify.channels[%d].events[%d] 未知事件 %q，可选：%s",
+					i, j, ev, strings.Join(eventNames(), ", "))
+			}
+			ch.Events[j] = e
+		}
 	}
 	for i := range c.Providers {
 		if c.Providers[i].Name == "" {

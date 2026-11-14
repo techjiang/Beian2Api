@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/asoe/beian2api/internal/model"
@@ -43,18 +44,31 @@ func TestCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
 func TestHistoryAppendAndLimit(t *testing.T) {
 	s := open(t)
+	// 同一天内备案改两次，两条快照都必须留下：
+	// 按「域名+天」做 key 会让后一条顶掉前一条，那次变更的 diff 就永久没了。
 	for _, d := range []int64{1, 2, 3} {
-		r := model.Record{Domain: "a.com", ICPCode: "x", FetchedAt: d}
+		r := model.Record{Domain: "a.com", ICPCode: "x" + itoa(d), FetchedAt: d}
 		if err := s.AppendHistory(r); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// 同一时间点会覆盖，所以应只有 1 条。
 	h, err := s.History("a.com", 0)
-	if err != nil || len(h) != 1 {
-		t.Fatalf("同日应覆盖，实际 %d 条 (%v)", len(h), err)
+	if err != nil || len(h) != 3 {
+		t.Fatalf("同一天内每次变更都应留下快照，实际 %d 条 (%v)", len(h), err)
+	}
+	if h[0].ICPCode != "x1" || h[2].ICPCode != "x3" {
+		t.Fatalf("历史应按时间升序: %+v", h)
+	}
+	// 同一时间点重复写入要覆盖，不能无限膨胀。
+	if err := s.AppendHistory(model.Record{Domain: "a.com", ICPCode: "x3", FetchedAt: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := s.History("a.com", 0); len(h) != 3 {
+		t.Fatalf("同一快照重复写入应覆盖，实际 %d 条", len(h))
 	}
 	if other, _ := s.History("b.com", 0); len(other) != 0 {
 		t.Fatal("其他域名不应有历史")

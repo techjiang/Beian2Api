@@ -212,3 +212,33 @@ func TestNotifyValidation(t *testing.T) {
 		t.Fatalf("重试次数上限应生效: %d", c.Notify.Retries)
 	}
 }
+
+// 事件名拼错必须报错：这类错误不会导致启动失败，只会让通知永远不发。
+func TestValidateRejectsUnknownNotifyEvent(t *testing.T) {
+	c := Default()
+	c.Notify.Channels = []NotifyChannel{{Name: "x", URL: "https://example.com/hook", Events: []string{"upstream-error"}}}
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("拼错的事件名应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "upstream-error") {
+		t.Fatalf("错误信息应指出哪里错: %v", err)
+	}
+
+	c2 := Default()
+	c2.Notify.Channels = []NotifyChannel{{Name: "x", URL: "https://example.com/hook", Events: []string{"Changed", "upstream_error"}}}
+	if err := c2.Validate(); err != nil {
+		t.Fatalf("合法事件名应通过: %v", err)
+	}
+	if c2.Notify.Channels[0].Events[0] != "changed" {
+		t.Fatalf("事件名应归一化为小写: %v", c2.Notify.Channels[0].Events)
+	}
+}
+
+// 默认不信任转发头：这几个头客户端能随便填。
+func TestTrustProxyDefaultOff(t *testing.T) {
+	c := Default()
+	if c.TrustProxy {
+		t.Fatal("默认不该信任 X-Forwarded-For")
+	}
+}

@@ -62,19 +62,25 @@ func (l *rateLimiter) allow(ip string) bool {
 	return true
 }
 
-// clientIP 取真实客户端 IP，兼容常见反代头。
-func clientIP(r *http.Request) string {
-	if v := r.Header.Get("CF-Connecting-IP"); v != "" {
-		return v
-	}
-	if v := r.Header.Get("X-Real-IP"); v != "" {
-		return v
-	}
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		if i := strings.IndexByte(v, ','); i > 0 {
-			return strings.TrimSpace(v[:i])
+// clientIP 取客户端 IP。
+//
+// 只有明确配置 trust_proxy 时才看 X-Forwarded-For / X-Real-IP。
+// 这几个头是客户端可以随便填的：无条件采信就等于让攻击者自己选限流的 key，
+// 每个请求换一个头就换一桶令牌，限流形同虚设。
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxy {
+		if v := r.Header.Get("CF-Connecting-IP"); v != "" {
+			return v
 		}
-		return strings.TrimSpace(v)
+		if v := r.Header.Get("X-Real-IP"); v != "" {
+			return v
+		}
+		if v := r.Header.Get("X-Forwarded-For"); v != "" {
+			if i := strings.IndexByte(v, ','); i > 0 {
+				return strings.TrimSpace(v[:i])
+			}
+			return strings.TrimSpace(v)
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -94,7 +100,7 @@ func (s *Server) withRateLimit(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		ip := clientIP(r)
+		ip := s.clientIP(r)
 		if !s.limiter.allow(ip) {
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, http.StatusTooManyRequests, "rate_limited", "请求过于频繁，请稍后再试")

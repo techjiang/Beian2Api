@@ -169,11 +169,12 @@ func TestHistoryAndDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	hist, err := svc.History("example.com", 0)
-	if err != nil || len(hist) != 1 {
-		// 同一天内相同域名会覆盖，只保留最新一条，这是预期行为。
-		if len(hist) != 1 {
-			t.Fatalf("历史快照应覆盖同日记录，实际 %d 条 (%v)", len(hist), err)
-		}
+	if err != nil || len(hist) != 2 {
+		// 备案号从 -1 变成 -2 是一次真实变更，两条快照都要留下。
+		t.Fatalf("每次变更都应留下历史快照，实际 %d 条 (%v)", len(hist), err)
+	}
+	if hist[1].ICPCode != "京ICP备4号-2" {
+		t.Fatalf("最新快照应在末尾: %+v", hist)
 	}
 	d := DiffRecords(&model.Record{ICPCode: "a"}, &model.Record{ICPCode: "b"})
 	if len(d) != 1 || d[0].Field != "备案号" {

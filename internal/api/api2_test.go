@@ -429,3 +429,62 @@ func TestNotifyTestMethodNotAllowed(t *testing.T) {
 		t.Fatalf("应 405，实际 %d", w.Code)
 	}
 }
+
+// 未声明 trust_proxy 时，客户端伪造的 X-Forwarded-For 不能换到新的限流桶。
+func TestRateLimitIgnoresForgedForwardedFor(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) {
+		c.RateLimit.Enabled = true
+		c.RateLimit.RPS = 1
+		c.RateLimit.Burst = 2
+	})
+	var codes []int
+	for i := 0; i < 12; i++ {
+		// 每个请求都换一个伪造的代理头：如果实现采信了它，就永远不会 429。
+		resp, _ := get(t, h, "/api/v1/query?domain=example.com", map[string]string{
+			"X-Forwarded-For": fmt.Sprintf("10.0.0.%d", i),
+			"X-Real-IP":       fmt.Sprintf("10.0.1.%d", i),
+		})
+		codes = append(codes, resp.StatusCode)
+	}
+	got429 := false
+	for _, c := range codes {
+		if c == http.StatusTooManyRequests {
+			got429 = true
+		}
+	}
+	if !got429 {
+		t.Fatalf("伪造 X-Forwarded-For 不应绕过限流: %v", codes)
+	}
+}
+
+// 声明了 trust_proxy 后，反代传来的真实 IP 才参与限流分桶。
+func TestRateLimitHonorsTrustProxy(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) {
+		c.RateLimit.Enabled = true
+		c.RateLimit.RPS = 1
+		c.RateLimit.Burst = 1
+		c.TrustProxy = true
+	})
+	// 两个不同的真实 IP 各自有一桶，互不影响。
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
+		resp, _ := get(t, h, "/api/v1/query?domain=example.com", map[string]string{"X-Real-IP": ip})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s 首个请求应放行，实际 %d", ip, resp.StatusCode)
+		}
+	}
+	// 同一个 IP 第二次就该被限。
+	resp, _ := get(t, h, "/api/v1/query?domain=example.com", map[string]string{"X-Real-IP": "1.1.1.1"})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("同一 IP 超额应 429，实际 %d", resp.StatusCode)
+	}
+}
+
+// trust_proxy 关闭时，带转发头来的备份请求按「非直连」拒绝。
+func TestAdminBackupRejectsForwardedWithoutTrustProxy(t *testing.T) {
+	s, h := mkServer(t, nil)
+	_ = s
+	resp, body := get(t, h, "/api/v1/admin/backup", map[string]string{"X-Forwarded-For": "1.2.3.4"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("未信任代理时应拒绝，实际 %d %s", resp.StatusCode, body)
+	}
+}

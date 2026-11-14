@@ -208,7 +208,9 @@ func cmdServe(args []string) error {
 	notifier := buildNotifier(cfg, st, log)
 	var w *watch.Watcher
 	if cfg.Watch.Enabled {
-		w = watch.New(svc, st, cfg.WatchInterval(), cfg.Watch.Workers, notifier, log).WithBaseURL(baseURL(cfg))
+		w = watch.New(svc, st, cfg.WatchInterval(), cfg.Watch.Workers, notifier, log).
+			WithBaseURL(baseURL(cfg)).
+			WithFailThreshold(cfg.Watch.FailThreshold)
 	}
 
 	if notifier.Enabled() {
@@ -256,6 +258,16 @@ func cmdServe(args []string) error {
 	}
 	if w != nil {
 		w.Stop()
+	}
+	// 推送是后台协程：不等它们，最后一条「备案注销」可能就在关闭瞬间被丢掉。
+	if notifier.Enabled() {
+		done := make(chan struct{})
+		go func() { notifier.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			log.Warn("仍有推送未完成，已超时退出")
+		}
 	}
 	log.Info("已退出")
 	return nil

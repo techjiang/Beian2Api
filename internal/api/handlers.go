@@ -179,6 +179,12 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			item.Changes = old.Changes
 			item.LastFP = old.LastFP
 			item.LastICP = old.LastICP
+			// 故障状态也要一起保留：重复点「加入监控」不该让一个
+			// 已经连续失败十轮的域名重新开始计数、再收到一条重复告警。
+			item.FailStreak = old.FailStreak
+			item.Alerted = old.Alerted
+			item.LastOKAt = old.LastOKAt
+			item.LastError = old.LastError
 		}
 		if item.LastFP == "" {
 			if hist, _ := s.svc.History(d, 1); len(hist) > 0 {
@@ -213,9 +219,6 @@ func (s *Server) handleWatchList(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
-	}
-	if items == nil {
-		items = nil
 	}
 	writeOK(w, map[string]any{"total": len(items), "items": items, "interval": s.cfg.Watch.Interval})
 }

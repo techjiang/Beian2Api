@@ -7,6 +7,10 @@ data_dir: "./data"     # 数据目录（缓存、历史、监控都在一个文�
 log_level: "info"      # debug / info / warn / error
 base_url: ""           # 对外访问地址，用于生成 OpenAPI 里的 server；留空自动推断
 
+# 只有在反向代理后面才打开。打开后才采信 X-Forwarded-For / X-Real-IP，
+# 否则限流的 key 就成了客户端自己填的头——每个请求换个头就换一桶令牌。
+trust_proxy: false
+
 cache:
   ttl: 21600           # 已备案结果缓存 6 小时
   negative: 600        # 未备案结果缓存 10 分钟
@@ -41,6 +45,7 @@ watch:
   enabled: true
   interval: 86400      # 每 24 小时巡检一次
   workers: 4
+  fail_threshold: 3    # 连续几轮回源失败才推送一次告警（1 会被偶发抖动刷屏）
   webhook: ""          # 旧字段，等价于一个 generic 通道；多渠道请用下面的 notify
 
 notify:
@@ -52,8 +57,13 @@ notify:
       url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
       # 机器人开了「加签」时填这里，会自动补 timestamp 与 sign
       secret: ""
-      # 只推指定事件：changed / revoked / registered；省略即全推
-      events: [changed, revoked, registered]
+      # 只推指定事件；省略即全推。可选：
+      #   changed        备案信息变化
+      #   revoked        备案被注销
+      #   registered     新备案
+      #   upstream_error 连续多轮查不到（比变更更急：你不知道它现在死没死）
+      #   recovered      从故障中恢复
+      events: [changed, revoked, registered, upstream_error, recovered]
 
     # - name: 企业微信
     #   url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"

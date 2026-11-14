@@ -38,7 +38,11 @@ const (
 	EventChanged    = "changed"
 	EventRevoked    = "revoked"
 	EventRegistered = "registered"
-	EventTest       = "test"
+	// EventUpstreamError / EventRecovered 是「上游打不通」这条链路的事件。
+	// 一个域名连续几轮都没法回源，比备案号变了更急：你不知道它现在是死是活。
+	EventUpstreamError = "upstream_error"
+	EventRecovered     = "recovered"
+	EventTest          = "test"
 )
 
 // Channel 是一个推送通道配置。
