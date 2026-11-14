@@ -1,0 +1,309 @@
+/* Beian2API 前端：原生 JS，无依赖，约 4KB。 */
+(function () {
+  'use strict';
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var form = $('#form'), input = $('#q'), goBtn = $('#go'), result = $('#result');
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function num(n) { return (n == null ? 0 : n).toLocaleString('zh-CN'); }
+
+  function api(path, opts) {
+    return fetch(path, opts).then(function (r) {
+      return r.json().then(function (j) {
+        if (!r.ok || j.ok === false) {
+          var m = (j.error && j.error.message) || ('HTTP ' + r.status);
+          throw new Error(m);
+        }
+        return j.data;
+      });
+    });
+  }
+
+  function showError(msg) {
+    result.innerHTML = '';
+    var box = el('div', 'err-box fade');
+    box.appendChild(el('strong', null, '查询失败：'));
+    box.appendChild(document.createTextNode(msg));
+    result.appendChild(box);
+  }
+
+  function kv(list) {
+    var dl = el('dl', 'kv');
+    list.forEach(function (p) {
+      if (!p[1]) return;
+      dl.appendChild(el('dt', null, p[0]));
+      var dd = el('dd');
+      if (p[2]) { var s = el('strong', null, p[1]); dd.appendChild(s); }
+      else dd.textContent = p[1];
+      dl.appendChild(dd);
+    });
+    return dl;
+  }
+
+  function render(d) {
+    result.innerHTML = '';
+    var card = el('div', 'card res-card fade');
+    var head = el('div', 'res-head');
+    head.appendChild(el('h2', null, d.domain));
+
+    var b;
+    if (!d.found) b = el('span', 'badge warn', '未备案');
+    else if (d.stale) b = el('span', 'badge gray', '缓存快照');
+    else b = el('span', 'badge', '已备案');
+    head.appendChild(b);
+    if (d.cached) head.appendChild(el('span', 'badge gray', '缓存命中'));
+    var meta = el('span', 'meta', (d.cost_ms || 0).toFixed(1) + ' ms · ' + (d.source || '—'));
+    head.appendChild(meta);
+    card.appendChild(head);
+
+    if (d.found && d.records && d.records.length) {
+      d.records.forEach(function (r, i) {
+        if (i > 0) card.appendChild(el('hr', null));
+        card.appendChild(kv([
+          ['备案号', r.icp_code, true],
+          ['主办单位', r.unit_name],
+          ['单位性质', r.unit_type],
+          ['网站名称', r.site_name],
+          ['备案省份', r.province],
+          ['审核时间', r.audit_time]
+        ]));
+      });
+    } else {
+      card.appendChild(el('p', null, '该域名在公开备案库中没有记录。若刚提交备案，通常需要 1–3 个工作日同步。'));
+    }
+
+    if (d.notice) card.appendChild(el('div', 'notice', d.notice));
+
+    var acts = el('div', 'actions');
+    var copy = el('button', 'ghost small', '复制 JSON');
+    copy.onclick = function () {
+      navigator.clipboard.writeText(JSON.stringify(d, null, 2)).then(function () {
+        copy.textContent = '已复制 ✓';
+        setTimeout(function () { copy.textContent = '复制 JSON'; }, 1600);
+      });
+    };
+    acts.appendChild(copy);
+
+    if (d.found) {
+      var his = el('button', 'ghost small', '查看历史');
+      his.onclick = function () { loadHistory(d.domain, card); };
+      acts.appendChild(his);
+
+      var badge = el('button', 'ghost small', '徽章代码');
+      badge.onclick = function () {
+        var src = location.origin + '/badge/icp.svg?domain=' + encodeURIComponent(d.domain);
+        navigator.clipboard.writeText('![' + d.domain + ' 备案](' + src + ')');
+        badge.textContent = '已复制 ✓';
+        setTimeout(function () { badge.textContent = '徽章代码'; }, 1600);
+      };
+      acts.appendChild(badge);
+
+      var watchBtn = el('button', 'ghost small', '加入监控');
+      watchBtn.onclick = function () {
+        api('/api/v1/watch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ domain: d.domain })
+        }).then(function () {
+          watchBtn.textContent = '监控中 ✓';
+        }).catch(function (e) { watchBtn.textContent = '失败：' + e.message; });
+      };
+      acts.appendChild(watchBtn);
+    }
+    card.appendChild(acts);
+    result.appendChild(card);
+  }
+
+  function loadHistory(domain, card) {
+    api('/api/v1/history?domain=' + encodeURIComponent(domain)).then(function (d) {
+      var old = $('.hist', card);
+      if (old) { old.remove(); return; }
+      var box = el('div', 'hist');
+      box.style.marginTop = '16px';
+      if (!d.history || !d.history.length) {
+        box.appendChild(el('p', null, '暂无历史快照。'));
+      } else {
+        var t = el('table');
+        var thead = el('thead'), tr = el('tr');
+        ['时间', '备案号', '主办单位', '变化'].forEach(function (h) { tr.appendChild(el('th', null, h)); });
+        thead.appendChild(tr); t.appendChild(thead);
+        var tb = el('tbody');
+        d.history.slice().reverse().forEach(function (n) {
+          var row = el('tr');
+          var r = n.record;
+          row.appendChild(el('td', null, new Date(r.fetched_at * 1000).toLocaleDateString('zh-CN')));
+          row.appendChild(el('td', null, r.icp_code || '—'));
+          row.appendChild(el('td', null, r.unit_name || '—'));
+          row.appendChild(el('td', null, n.diff && n.diff.length ? n.diff.map(function (x) { return x.field; }).join('、') : '—'));
+          tb.appendChild(row);
+        });
+        t.appendChild(tb);
+        box.appendChild(t);
+      }
+      card.appendChild(box);
+    }).catch(function (e) { showError(e.message); });
+  }
+
+  function submit() {
+    var v = input.value.trim();
+    if (!v) return;
+    goBtn.disabled = true;
+    goBtn.innerHTML = '<span class="spin"></span>查询中';
+    var t0 = performance.now();
+    api('/api/v1/query?domain=' + encodeURIComponent(v))
+      .then(function (d) {
+        render(d);
+        history.replaceState(null, '', '?domain=' + encodeURIComponent(d.domain));
+      })
+      .catch(function (e) { showError(e.message); })
+      .finally(function () {
+        goBtn.disabled = false;
+        goBtn.textContent = '查询';
+        var el2 = $('.meta');
+        if (el2) el2.textContent = el2.textContent + ' · 端到端 ' + (performance.now() - t0).toFixed(0) + ' ms';
+        loadStats();
+      });
+  }
+
+  form.addEventListener('submit', function (e) { e.preventDefault(); submit(); });
+  document.querySelectorAll('.chips button').forEach(function (b) {
+    b.addEventListener('click', function () { input.value = b.dataset.d; submit(); });
+  });
+
+  function loadStats() {
+    api('/api/v1/stats').then(function (s) {
+      $('#s-hit').textContent = s.requests.hit_rate;
+      $('#s-req').textContent = '命中 ' + num(s.requests.cache_hits) + ' / 回源 ' + num(s.requests.cache_misses);
+      $('#s-cache').textContent = num(s.counts.cache);
+      $('#s-up').textContent = fmtDur(s.uptime_sec);
+      $('#s-ver').textContent = '版本 ' + s.version;
+      $('#s-prov').textContent = (s.providers || []).length + ' 个';
+      $('#s-prov').title = (s.providers || []).join(', ');
+    }).catch(function () {});
+  }
+  function fmtDur(s) {
+    if (s < 60) return s + ' 秒';
+    if (s < 3600) return Math.floor(s / 60) + ' 分';
+    if (s < 86400) return Math.floor(s / 3600) + ' 时 ' + Math.floor(s % 3600 / 60) + ' 分';
+    return Math.floor(s / 86400) + ' 天';
+  }
+
+  var snippets = {
+    curl: 'curl "' + location.origin + '/api/v1/query?domain=example.com"\n\n# 强制回源\ncurl "' + location.origin + '/api/v1/query?domain=example.com&refresh=1"\n\n# 批量\ncurl -X POST "' + location.origin + '/api/v1/batch" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"domains":["qq.com","baidu.com"]}\'',
+    js: "const r = await fetch('" + location.origin + "/api/v1/query?domain=example.com');\nconst { data } = await r.json();\nif (data.found) console.log(data.records[0].icp_code);",
+    py: 'import requests\n\nr = requests.get("' + location.origin + '/api/v1/query",\n                 params={"domain": "example.com"}, timeout=10)\nprint(r.json()["data"]["records"][0]["icp_code"])',
+    go: 'resp, err := http.Get("' + location.origin + '/api/v1/query?domain=example.com")\nif err != nil { log.Fatal(err) }\ndefer resp.Body.Close()\n\nvar out struct {\n\tData struct {\n\t\tFound   bool `json:"found"`\n\t\tRecords []struct {\n\t\t\tICPCode string `json:"icp_code"`\n\t\t} `json:"records"`\n\t} `json:"data"`\n}\njson.NewDecoder(resp.Body).Decode(&out)\nfmt.Println(out.Data.Records[0].ICPCode)',
+    badge: '<!-- Markdown -->\n![' + 'example.com 备案](' + location.origin + '/badge/icp.svg?domain=example.com)\n\n<!-- HTML -->\n<img src="' + location.origin + '/badge/icp.svg?domain=example.com" alt="ICP">'
+  };
+  var tabs = document.querySelectorAll('#tabs button');
+  function setSnippet(t) {
+    tabs.forEach(function (b) { b.classList.toggle('on', b.dataset.t === t); });
+    $('#snippet').textContent = snippets[t];
+  }
+  tabs.forEach(function (b) { b.addEventListener('click', function () { setSnippet(b.dataset.t); }); });
+  setSnippet('curl');
+  loadStats();
+  setInterval(loadStats, 30000);
+
+  var p = new URLSearchParams(location.search).get('domain');
+  if (p) { input.value = p; submit(); }
+})();
+
+/* ---- 备案号校验器 ---- */
+(function () {
+  'use strict';
+  var form = document.getElementById('vform');
+  var input = document.getElementById('vc');
+  var box = document.getElementById('vresult');
+  if (!form) return;
+
+  function kv(list) {
+    var dl = document.createElement('dl');
+    dl.className = 'kv';
+    list.forEach(function (p) {
+      if (!p[1]) return;
+      var dt = document.createElement('dt'); dt.textContent = p[0];
+      var dd = document.createElement('dd'); dd.textContent = p[1];
+      dl.appendChild(dt); dl.appendChild(dd);
+    });
+    return dl;
+  }
+
+  function render(d) {
+    box.innerHTML = '';
+    var card = document.createElement('div');
+    card.className = 'res-card fade';
+    card.style.padding = '14px 0 0';
+
+    var head = document.createElement('div');
+    head.className = 'res-head';
+    var h = document.createElement('h2'); h.textContent = d.normalized || d.input;
+    head.appendChild(h);
+    var badge = document.createElement('span');
+    badge.className = 'badge' + (d.valid ? '' : ' err');
+    badge.textContent = d.valid ? '结构合法' : '存在问题';
+    head.appendChild(badge);
+    card.appendChild(head);
+
+    card.appendChild(kv([
+      ['省份', d.province ? d.province + '（' + d.region + '）' : ''],
+      ['类型', d.kind],
+      ['主体序号', d.serial],
+      ['站点序号', d.site_seq],
+      ['规范化', d.normalized]
+    ]));
+
+    if (d.fixed && d.fixed.length) {
+      var n = document.createElement('div');
+      n.className = 'notice';
+      n.textContent = '已自动纠正：' + d.fixed.join('；');
+      card.appendChild(n);
+    }
+    if (d.issues && d.issues.length) {
+      var e = document.createElement('div');
+      e.className = 'err-box';
+      e.textContent = d.issues.join('；');
+      card.appendChild(e);
+    }
+    if (d.cross_check) {
+      var c = document.createElement('div');
+      c.className = 'notice';
+      if (!d.cross_check.checked) {
+        c.textContent = '与域名交叉核对未完成：' + (d.cross_check.reason || '');
+      } else if (d.cross_check.match) {
+        c.textContent = '✓ 与查询到的实际备案号一致';
+        c.style.color = 'var(--ok)';
+        c.style.background = 'rgba(5,150,105,.1)';
+        c.style.borderColor = 'rgba(5,150,105,.24)';
+      } else {
+        c.textContent = '✗ 与该域名的实际备案号不一致，实际为：' + (d.cross_check.actual || '未查到');
+      }
+      card.appendChild(c);
+    }
+    box.appendChild(card);
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var v = input.value.trim();
+    if (!v) return;
+    box.innerHTML = '<div class="hint">校验中…</div>';
+    fetch('/api/v1/verify?code=' + encodeURIComponent(v))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) throw new Error((j.error && j.error.message) || '校验失败');
+        render(j.data);
+      })
+      .catch(function (err) {
+        box.innerHTML = '';
+        var d = document.createElement('div');
+        d.className = 'err-box'; d.textContent = err.message;
+        box.appendChild(d);
+      });
+  });
+})();

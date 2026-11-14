@@ -1,0 +1,93 @@
+# Beian2API 流水线
+# 语法依据：https://docs.cnb.cool/zh/build/grammar.html
+# 镜像推送依据：https://docs.cnb.cool/zh/artifact/docker.html
+# Release 依据：https://docs.cnb.cool/zh/build/internal-steps/git/release.html
+
+main:
+  push:
+    # 质量门禁：格式 → 静态检查 → 竞态测试
+    - name: check
+      docker:
+        image: golang:1.23
+      env:
+        GOPROXY: https://goproxy.cn,direct
+        CGO_ENABLED: "1"
+      stages:
+        - name: gofmt
+          script: |
+            unformatted=$(gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "以下文件未格式化："
+              echo "$unformatted"
+              exit 1
+            fi
+            echo "格式检查通过"
+        - name: vet
+          script: go vet ./...
+        - name: test
+          script: go test -race ./... -count=1
+
+    # 交叉编译全部平台，确认各架构都能出包
+    - name: cross-build
+      docker:
+        image: golang:1.23
+      env:
+        GOPROXY: https://goproxy.cn,direct
+        CGO_ENABLED: "0"
+      stages:
+        - name: build
+          script: |
+            VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+            echo "构建版本：$VER"
+            VER="$VER" bash scripts/build.sh
+        - name: checksum
+          script: |
+            cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+$:
+  # PR 只跑检查，不产出制品
+  pull_request:
+    - name: pr-check
+      docker:
+        image: golang:1.23
+      env:
+        GOPROXY: https://goproxy.cn,direct
+      stages:
+        - name: gofmt
+          script: |
+            unformatted=$(gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "未格式化文件：$unformatted"
+              exit 1
+            fi
+        - name: vet
+          script: go vet ./...
+        - name: test
+          script: go test ./... -count=1
+
+  # 打 Tag 时构建镜像推送到本仓库的 Docker 制品库，并发布 Release
+  tag_push:
+    - name: docker-publish
+      services:
+        - docker
+      stages:
+        - name: build-and-push
+          script: |
+            set -e
+            IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+            echo "推送镜像 $IMAGE:$CNB_BRANCH"
+            docker build --build-arg VERSION="$CNB_BRANCH" \
+              -t "$IMAGE:$CNB_BRANCH" \
+              -t "$IMAGE:latest" .
+            docker push "$IMAGE:$CNB_BRANCH"
+            docker push "$IMAGE:latest"
+            echo "完成：$IMAGE:$CNB_BRANCH"
+
+    - name: release
+      stages:
+        - name: create-release
+          type: git:release
+          options:
+            title: $CNB_BRANCH
+            descriptionFromFile: CHANGELOG.md
+            latest: true

@@ -1,0 +1,12 @@
+# 放在 Caddy 旁边，自动签 HTTPS，转发到本机 Beian2API
+beian.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+}

@@ -1,0 +1,7 @@
+bin/
+dist/
+data/
+*.db
+*.log
+config.yaml
+coverage.out

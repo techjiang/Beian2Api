@@ -1,0 +1,29 @@
+services:
+  beian2api:
+    image: cnb.cool/asoe/techsauce/beian2api:latest
+    # 想自己构建就把上面一行换成 build: ..
+    container_name: beian2api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # 数据只有一个文件，卷挂稳了就等于备份好了
+      - ./data:/data
+    environment:
+      TZ: Asia/Shanghai
+      BEIAN2API_LISTEN: ":8080"
+      BEIAN2API_DATA_DIR: /data
+      # 可选：启用鉴权
+      # BEIAN2API_API_KEYS: "bk_你的key"
+      # 可选：变更推送
+      # BEIAN2API_WEBHOOK: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

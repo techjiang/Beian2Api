@@ -1,0 +1,44 @@
+# Beian2API 配置示例
+# 优先级：默认值 < 本文件 < 环境变量
+# 只需复制为 config.yaml 再按需修改；不复制也能直接跑。
+
+listen: ":8080"        # 监听地址，:8080 表示所有网卡
+data_dir: "./data"     # 数据目录（缓存、历史、监控都在一个文件里）
+log_level: "info"      # debug / info / warn / error
+base_url: ""           # 对外访问地址，用于生成 OpenAPI 里的 server；留空自动推断
+
+cache:
+  ttl: 21600           # 已备案结果缓存 6 小时
+  negative: 600        # 未备案结果缓存 10 分钟
+  stale_max: 604800    # 上游全挂时，最多回退 7 天内的旧快照
+
+rate_limit:
+  enabled: true        # 每 IP 令牌桶
+  rps: 20
+  burst: 60
+
+auth:
+  enabled: false       # 打开后所有 /api 接口需要 API Key
+  keys: []
+  # keys:
+  #   - "bk_换成你自己的key"   # 用 `beian2api keygen` 生成
+
+cors:
+  - "*"                # 生产环境建议改成你的前端域名
+
+providers:
+  # weight 越大越优先，0 表示禁用
+  - name: miit          # 工信部官方接口，数据最权威，但机房 IP 常被 WAF 拦
+    enabled: true
+    weight: 100
+    timeout: 8
+  - name: apihz         # 第三方公开接口，作为后备
+    enabled: true
+    weight: 40
+    timeout: 8
+
+watch:
+  enabled: true
+  interval: 86400      # 每 24 小时巡检一次
+  workers: 4
+  webhook: ""          # 变更推送：钉钉/企业微信/飞书/任意 HTTP

@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档 · Beian2API</title>
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/style.css?v=__ASSET_VERSION__">
+<style>
+  .wrap { max-width: 780px; }
+  h2 { font-size: 20px; margin: 36px 0 10px; letter-spacing: -.01em; }
+  h3 { font-size: 16px; margin: 22px 0 8px; }
+  ul, ol { padding-left: 22px; color: var(--fg-soft); }
+  li { margin: 5px 0; }
+  p { color: var(--fg-soft); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
+  .method { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 700; margin-right: 7px; vertical-align: 1px; }
+  .get { background: rgba(5,150,105,.15); color: var(--ok); }
+  .post { background: rgba(79,70,229,.15); color: var(--brand); }
+  .del { background: rgba(220,38,38,.13); color: var(--err); }
+  .ep { margin: 18px 0 6px; font-weight: 600; font-family: ui-monospace, monospace; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/"><img src="/logo.svg" alt="Beian2API"></a>
+    <div class="brand">Beian2API<small>文档</small></div>
+    <nav>
+      <a href="/">首页</a>
+      <a href="/api/v1/openapi.json">OpenAPI</a>
+      <a href="https://cnb.cool/asoe/TechSauce/Beian2Api" target="_blank" rel="noopener">仓库</a>
+    </nav>
+  </header>
+
+  <h2>三分钟上手</h2>
+  <p>下载单个二进制，直接运行，没有任何依赖：</p>
+  <pre>./beian2api serve</pre>
+  <p>默认监听 <code>:8080</code>，数据写在 <code>./data</code>。打开浏览器就能用网页版查询台。</p>
+
+  <hr>
+  <h2>接口一览</h2>
+
+  <div class="ep"><span class="method get">GET</span>/api/v1/query</div>
+  <p>查询单个域名的备案信息。</p>
+  <table>
+    <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+    <tr><td>domain</td><td>string</td><td>必填。可带协议与路径，服务端会自动归一化</td></tr>
+    <tr><td>refresh</td><td>bool</td><td>跳过缓存强制回源</td></tr>
+  </table>
+  <pre>curl "http://localhost:8080/api/v1/query?domain=example.com"</pre>
+  <pre>{
+  "ok": true,
+  "data": {
+    "domain": "example.com",
+    "found": true,
+    "records": [{
+      "domain": "example.com",
+      "unit_name": "示例科技有限公司",
+      "unit_type": "企业",
+      "site_name": "示例站点",
+      "icp_code": "京ICP备12345678号-1",
+      "province": "京",
+      "audit_time": "2024-01-01",
+      "source": "miit",
+      "fetched_at": 1735689600
+    }],
+    "cached": false,
+    "stale": false,
+    "source": "miit",
+    "cost_ms": 312.4,
+    "fetched_at": 1735689600
+  }
+}</pre>
+
+  <h3>字段含义</h3>
+  <ul>
+    <li><code>found</code>：公开备案库中是否存在该域名。</li>
+    <li><code>cached</code>：本次结果来自本地缓存。</li>
+    <li><code>stale</code>：上游全部不可用，返回的是本地最后快照（此时 <code>notice</code> 会给出说明）。</li>
+    <li><code>source</code>：实际提供数据的上游名。</li>
+  </ul>
+
+  <hr>
+  <div class="ep"><span class="method post">POST</span>/api/v1/batch</div>
+  <p>批量查询，单次最多 50 个域名，服务端内部并发限流。</p>
+  <pre>curl -X POST "http://localhost:8080/api/v1/batch" \
+  -H "Content-Type: application/json" \
+  -d '{"domains":["qq.com","baidu.com"]}'</pre>
+
+  <hr>
+  <div class="ep"><span class="method get">GET</span>/api/v1/history</div>
+  <p>查看某域名的历史快照，并把相邻两次的变化算好给你。</p>
+  <pre>curl "http://localhost:8080/api/v1/history?domain=example.com&amp;limit=10"</pre>
+
+  <div class="ep"><span class="method get">GET</span>/api/v1/diff</div>
+  <p>直接对比最近两次快照，适合做"备案信息被悄悄改了"的检查。</p>
+
+  <hr>
+  <div class="ep"><span class="method post">POST</span>/api/v1/watch</div>
+  <p>把域名加入巡检列表。加入时会先抓一次建立基线，之后每次巡检只在内容真变了才报警。</p>
+  <pre>curl -X POST "http://localhost:8080/api/v1/watch" \
+  -H "Content-Type: application/json" -d '{"domain":"example.com"}'</pre>
+  <div class="ep"><span class="method del">DELETE</span>/api/v1/watch?domain=example.com</div>
+  <div class="ep"><span class="method get">GET</span>/api/v1/watch/list</div>
+  <div class="ep"><span class="method post">POST</span>/api/v1/watch/run</div>
+  <p>立即执行一轮巡检，返回本次发现的变更。配置 <code>watch.webhook</code> 后变更会推送到钉钉 / 企业微信 / 飞书 / 任意 HTTP 端点。</p>
+
+  <hr>
+  <div class="ep"><span class="method get">GET</span>/api/v1/verify</div>
+  <p>不查询上游，直接按编码规则校验一个备案号是否成立。可以同时带上 <code>domain</code> 做交叉核对，
+  用来识别伪造备案号的小作坊网站。</p>
+  <pre>curl "http://localhost:8080/api/v1/verify?code=京ICP备12345678号-1"</pre>
+  <pre>{
+  "ok": true,
+  "data": {
+    "input": "京ICP备12345678号-1",
+    "valid": true,
+    "normalized": "京ICP备12345678号-1",
+    "province": "北京市",
+    "region": "11",
+    "kind": "非经营性备案",
+    "serial": "12345678",
+    "site_seq": "1",
+    "issues": null,
+    "fixed": null,
+    "cross_check": null
+  }
+}</pre>
+  <p>它会自动纠正全角字符、多余空格、常见错字（如「泸」→「沪」）和数字段里的字母误写，
+  纠正过程会在 <code>fixed</code> 里说明。</p>
+
+  <hr>
+  <div class="ep"><span class="method get">GET</span>/api/v1/changes</div>
+  <p>最近记录的备案变更事件，支持 <code>since</code>（Unix 秒）增量拉取。</p>
+  <div class="ep"><span class="method get">GET</span>/api/v1/changes.rss</div>
+  <p>同样的变更事件，输出为 RSS 2.0，可直接喂给 RSS 阅读器或 IM 机器人。</p>
+
+  <div class="ep"><span class="method post">POST</span>/api/v1/admin/backup</div>
+  <p>服务不停机生成一致性快照到 <code>data/backups/</code>。未配置 API Key 时仅允许本机访问。</p>
+
+  <hr>
+  <h2>徽章</h2>
+  <p>把备案号直接嵌进 README，纯 SVG，任何主题都清晰：</p>
+  <pre>![备案](http://localhost:8080/badge/icp.svg?domain=example.com)</pre>
+  <p>效果：</p>
+  <p><img src="/badge/icp.svg?domain=qq.com" alt="ICP badge"></p>
+
+  <hr>
+  <h2>运维</h2>
+  <h3>备份</h3>
+  <p>数据就是一个文件。数据库有排他文件锁，服务运行时外部进程打不开，所以要备份请走在线接口：</p>
+  <pre>./beian2api backup -server http://127.0.0.1:8080
+
+# 或者
+curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup"</pre>
+  <p>服务停着的时候可以直接本地备份：</p>
+  <pre>./beian2api backup -o /path/to/beian2api.db</pre>
+  <h3>迁移</h3>
+  <p>把 <code>data/</code> 目录整个拷到新机器即可。想换存储形态就用 JSON：</p>
+  <pre>./beian2api export -o dump.json   # 旧机
+./beian2api import -i dump.json   # 新机</pre>
+  <h3>自检</h3>
+  <pre>./beian2api doctor</pre>
+  <p>会逐项检查配置、目录可写性、存储状态，并实际打一次上游（被 WAF 拦也会如实告诉你）。</p>
+  <h3>离线演示</h3>
+  <p>不想连外网？在配置里加一个演示数据源，用确定性伪造数据把整条链路跑通：</p>
+  <pre>BEIAN2API_PROVIDERS="mock:1" ./beian2api serve</pre>
+
+  <hr>
+  <h2>配置</h2>
+  <p>所有配置都可用环境变量覆盖，也可以用 <code>config.yaml</code>：</p>
+  <table>
+    <tr><th>环境变量</th><th>默认</th><th>说明</th></tr>
+    <tr><td>BEIAN2API_LISTEN</td><td>:8080</td><td>监听地址</td></tr>
+    <tr><td>BEIAN2API_DATA_DIR</td><td>./data</td><td>数据目录</td></tr>
+    <tr><td>BEIAN2API_API_KEYS</td><td>空</td><td>启用鉴权的 key，逗号分隔</td></tr>
+    <tr><td>BEIAN2API_PROVIDERS</td><td>miit:1,apihz:.4</td><td>数据源与权重，权重 0 即禁用</td></tr>
+    <tr><td>BEIAN2API_TTL</td><td>21600</td><td>缓存秒数</td></tr>
+    <tr><td>BEIAN2API_WEBHOOK</td><td>空</td><td>变更推送地址</td></tr>
+  </table>
+
+  <hr>
+  <footer class="foot">
+    <span>Beian2API</span>
+    <span class="sp"><a href="/">← 返回查询台</a></span>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,212 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/asoe/beian2api/internal/config"
+	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/provider"
+	"github.com/asoe/beian2api/internal/store"
+)
+
+type stub struct {
+	recs  []model.Record
+	err   error
+	delay time.Duration
+	calls atomic.Int64
+}
+
+func (s *stub) Name() string { return "stub" }
+func (s *stub) Lookup(ctx context.Context, domain string) ([]model.Record, error) {
+	s.calls.Add(1)
+	if s.delay > 0 {
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.recs, s.err
+}
+
+func newSvc(t *testing.T, tasks ...provider.Task) (*Service, *store.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.Cache.TTL = 3600
+	cfg.Cache.Negative = 60
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close(); os.RemoveAll(dir) })
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	return New(cfg, st, tasks, log), st
+}
+
+func rec(icp string) model.Record {
+	r := model.Record{Domain: "example.com", UnitName: "示例公司", ICPCode: icp, Source: "stub", FetchedAt: model.Now()}
+	r.Normalize()
+	return r
+}
+
+func TestQueryCaches(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备1号-1")}}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+
+	r1, err := svc.Query(context.Background(), "example.com", Options{})
+	if err != nil || !r1.Found || r1.Cached {
+		t.Fatalf("首次查询应回源: %+v %v", r1, err)
+	}
+	r2, err := svc.Query(context.Background(), "example.com", Options{})
+	if err != nil || !r2.Cached {
+		t.Fatalf("第二次应命中缓存: %+v %v", r2, err)
+	}
+	if s.calls.Load() != 1 {
+		t.Fatalf("上游只应被调用一次，实际 %d", s.calls.Load())
+	}
+	r3, _ := svc.Query(context.Background(), "example.com", Options{Refresh: true})
+	if r3.Cached || s.calls.Load() != 2 {
+		t.Fatalf("refresh 应强制回源，calls=%d", s.calls.Load())
+	}
+}
+
+func TestQueryNegativeCache(t *testing.T) {
+	s := &stub{err: provider.ErrNotFound}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+	r, err := svc.Query(context.Background(), "example.com", Options{})
+	if err != nil || r.Found || !r.Cached && r.Source == "" {
+		t.Fatalf("无备案应返回 found=false: %+v %v", r, err)
+	}
+	r2, _ := svc.Query(context.Background(), "example.com", Options{})
+	if !r2.Cached {
+		t.Fatal("无备案结果也应被短暂缓存")
+	}
+}
+
+func TestQueryStaleFallback(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备2号-1")}}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	// 让缓存过期，并把上游打挂。
+	s.err = errors.New("boom")
+	s.recs = nil
+	svc.tasks[0].Provider = s
+	svc.st.DeleteCache("example.com")
+
+	// 先手工塞一条过期快照，验证回退路径。
+	_ = svc.st.PutCache(&store.Entry{
+		Domain: "example.com", Found: true, Records: []model.Record{rec("京ICP备2号-1")},
+		Source: "stub", FetchedAt: model.Now() - 100, ExpireAt: model.Now() - 10,
+	})
+	r, err := svc.Query(context.Background(), "example.com", Options{})
+	if err != nil {
+		t.Fatalf("上游全挂时应回退快照，实际报错 %v", err)
+	}
+	if !r.Stale || !r.Found || r.Notice == "" {
+		t.Fatalf("应标记 stale 并给出提示: %+v", r)
+	}
+}
+
+func TestQueryAllFailedNoCache(t *testing.T) {
+	s := &stub{err: errors.New("boom")}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err == nil {
+		t.Fatal("无缓存且上游全挂时应报错")
+	}
+}
+
+func TestQueryInvalidDomain(t *testing.T) {
+	svc, _ := newSvc(t, provider.Task{Provider: &stub{}, Timeout: time.Second})
+	for _, d := range []string{"", "abc", "http://", "-x.com"} {
+		if _, err := svc.Query(context.Background(), d, Options{}); !errors.Is(err, ErrInvalidDomain) {
+			t.Errorf("%q 应被判为非法域名", d)
+		}
+	}
+}
+
+func TestSingleflight(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备3号-1")}, delay: 120 * time.Millisecond}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+	if s.calls.Load() != 1 {
+		t.Fatalf("并发重复查询应被合并，上游调用 %d 次", s.calls.Load())
+	}
+}
+
+func TestHistoryAndDiff(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备4号-1")}}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	s.recs = []model.Record{rec("京ICP备4号-2")}
+	if _, err := svc.Query(context.Background(), "example.com", Options{Refresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	hist, err := svc.History("example.com", 0)
+	if err != nil || len(hist) != 1 {
+		// 同一天内相同域名会覆盖，只保留最新一条，这是预期行为。
+		if len(hist) != 1 {
+			t.Fatalf("历史快照应覆盖同日记录，实际 %d 条 (%v)", len(hist), err)
+		}
+	}
+	d := DiffRecords(&model.Record{ICPCode: "a"}, &model.Record{ICPCode: "b"})
+	if len(d) != 1 || d[0].Field != "备案号" {
+		t.Fatalf("diff 结果不对: %+v", d)
+	}
+}
+
+func TestRefreshBypassesSingleflight(t *testing.T) {
+	// refresh=true 必须真的回源，不能被正在进行的普通查询合并掉。
+	s := &stub{recs: []model.Record{rec("京ICP备5号-1")}, delay: 150 * time.Millisecond}
+	svc, _ := newSvc(t, provider.Task{Provider: s, Timeout: time.Second})
+
+	go func() { _, _ = svc.Query(context.Background(), "example.com", Options{}) }()
+	time.Sleep(20 * time.Millisecond)
+	if _, err := svc.Query(context.Background(), "example.com", Options{Refresh: true}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if s.calls.Load() != 2 {
+		t.Fatalf("refresh 应独立回源，上游调用 %d 次", s.calls.Load())
+	}
+}
+
+func TestRecordHistoryPicksSmallestSiteSeq(t *testing.T) {
+	a := rec("京ICP备1号-5")
+	b := rec("京ICP备1号-2")
+	st := &stub{recs: []model.Record{a, b}}
+	svc, _ := newSvc(t, provider.Task{Provider: st, Timeout: time.Second})
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	hist, _ := svc.History("example.com", 0)
+	if len(hist) != 1 || hist[0].ICPCode != "京ICP备1号-2" {
+		t.Fatalf("历史应取站点序号最小的记录，实际 %+v", hist)
+	}
+}

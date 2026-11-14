@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" role="img" aria-label="Beian2API">
+  <title>Beian2API</title>
+  <defs>
+    <linearGradient id="b2a-bg" x1="6" y1="4" x2="90" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset=".55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="b2a-ring" x1="20" y1="16" x2="76" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".42"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity=".12"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="76" height="76" rx="20" fill="url(#b2a-bg)"/>
+  <rect x="14.6" y="14.6" width="66.8" height="66.8" rx="16.2" fill="none" stroke="url(#b2a-ring)" stroke-width="2.4"/>
+  <path d="M28 50 40 62 68 34" fill="none" stroke="#F9FAFB" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="70" cy="70.5" r="15" fill="#FFFFFF"/>
+  <circle cx="70" cy="70.5" r="12" fill="#0284C7"/>
+  <circle cx="70" cy="70.5" r="10.6" fill="#0EA5E9"/>
+  <path d="M65 70.5 68.5 74 75 66" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

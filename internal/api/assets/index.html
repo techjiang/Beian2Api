@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beian2API — 极简高性能 ICP 备案查询接口</title>
+<meta name="description" content="自托管的 ICP 备案查询 API：多源竞速、本地快照、变更巡检、SVG 徽章，一个二进制跑起来。">
+<meta name="theme-color" content="#4f46e5">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/style.css?v=__ASSET_VERSION__">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <img src="/logo.svg" alt="Beian2API">
+    <div class="brand">Beian2API<small>备案查询，一次做对</small></div>
+    <nav>
+      <a href="/docs">文档</a>
+      <a href="/api/v1/openapi.json">OpenAPI</a>
+      <a href="https://cnb.cool/asoe/TechSauce/Beian2Api" target="_blank" rel="noopener">仓库</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>一个域名，<em>一次查清</em>备案。</h1>
+    <p>多源竞速 + 本地快照 + 变更巡检。上游抖动也不影响你的业务，返回永远是稳定的 JSON。</p>
+  </div>
+
+  <div class="card search">
+    <form id="form" autocomplete="off">
+      <label class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="q" type="search" placeholder="输入域名，例如 example.com" spellcheck="false" required>
+      </label>
+      <button id="go" type="submit">查询</button>
+    </form>
+    <div class="chips">
+      试试：
+      <button type="button" data-d="qq.com">qq.com</button>
+      <button type="button" data-d="baidu.com">baidu.com</button>
+      <button type="button" data-d="bilibili.com">bilibili.com</button>
+      <button type="button" data-d="taobao.com">taobao.com</button>
+    </div>
+  </div>
+
+  <div class="card search" style="margin-top:12px">
+    <form id="vform" autocomplete="off">
+      <label class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.2-2.9 7.8-7 9-4.1-1.2-7-4.8-7-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
+        <input id="vc" type="text" placeholder="校验备案号真伪，例如 京ICP备12345678号-1" spellcheck="false" required>
+      </label>
+      <button id="vgo" type="submit" class="ghost" style="padding:13px 20px">校验</button>
+    </form>
+    <div id="vresult"></div>
+  </div>
+
+  <div id="result"><div class="hint">输入域名开始查询。结果会缓存到本地，重复查询毫秒级返回。</div></div>
+
+  <section class="block">
+    <h3>能力对比</h3>
+    <div class="grid">
+      <div class="card tile"><div class="k">多源竞速</div><div class="v" style="font-size:16px">失败即切换</div><div class="s">任一上游可用就能出结果</div></div>
+      <div class="card tile"><div class="k">本地快照</div><div class="v" style="font-size:16px">上游挂了也不空</div><div class="s">回退最近一次成功数据</div></div>
+      <div class="card tile"><div class="k">备案号校验</div><div class="v" style="font-size:16px">识别伪造</div><div class="s">按编码规则逐段验真</div></div>
+      <div class="card tile"><div class="k">变更巡检</div><div class="v" style="font-size:16px">改了会通知</div><div class="s">Webhook / RSS 双通道</div></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h3>服务状态</h3>
+    <div class="grid" id="stats">
+      <div class="card tile"><div class="k">缓存命中率</div><div class="v" id="s-hit">–</div><div class="s" id="s-req">等待数据</div></div>
+      <div class="card tile"><div class="k">已缓存域名</div><div class="v" id="s-cache">–</div><div class="s">本地快照</div></div>
+      <div class="card tile"><div class="k">运行时长</div><div class="v" id="s-up">–</div><div class="s" id="s-ver">版本 –</div></div>
+      <div class="card tile"><div class="k">数据源</div><div class="v" id="s-prov">–</div><div class="s">按权重竞速</div></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h3>接口调用</h3>
+    <div class="tabs" id="tabs">
+      <button class="on" data-t="curl">curl</button>
+      <button data-t="js">JavaScript</button>
+      <button data-t="py">Python</button>
+      <button data-t="go">Go</button>
+      <button data-t="badge">徽章</button>
+    </div>
+    <pre id="snippet"></pre>
+  </section>
+
+  <footer class="foot">
+    <span>Beian2API · 自托管</span>
+    <span id="f-lic">数据来自公开备案查询渠道，仅供开发调试</span>
+    <span class="sp"><a href="/docs">完整文档 →</a></span>
+  </footer>
+</div>
+<script src="/assets/app.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

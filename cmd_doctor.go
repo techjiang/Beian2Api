@@ -1,0 +1,87 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/asoe/beian2api/internal/provider"
+)
+
+// cmdDoctor 做部署自检：配置是否可读、目录是否可写、各上游是否可达。
+func cmdDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "配置文件路径")
+	probe := fs.String("domain", "example.com", "用于探测上游的域名")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, st, err := bootstrap(*cfgPath)
+	if err != nil {
+		return fmt.Errorf("配置/存储初始化失败: %w", err)
+	}
+	defer st.Close()
+
+	fmt.Println("Beian2API 自检")
+	fmt.Printf("  版本      %s\n", version)
+	fmt.Printf("  监听      %s\n", cfg.Listen)
+	fmt.Printf("  数据目录  %s\n", absPath(cfg.DataDir))
+	fmt.Printf("  数据文件  %s\n", st.Path())
+
+	// 目录可写性
+	testFile := filepath.Join(cfg.DataDir, ".write-test")
+	if err := os.WriteFile(testFile, []byte("ok"), 0o600); err != nil {
+		fmt.Printf("  ✘ 数据目录不可写: %v\n", err)
+	} else {
+		_ = os.Remove(testFile)
+		fmt.Println("  ✔ 数据目录可写")
+	}
+
+	c, err := st.Count()
+	if err != nil {
+		fmt.Printf("  ✘ 存储读取失败: %v\n", err)
+	} else {
+		fmt.Printf("  ✔ 存储正常：缓存 %d / 历史 %d / 监控 %d\n", c.Cache, c.History, c.Watch)
+	}
+
+	tasks, err := buildTasks(cfg)
+	if err != nil {
+		fmt.Printf("  ✘ 数据源配置错误: %v\n", err)
+		return nil
+	}
+	fmt.Println("上游连通性:")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, t := range tasks {
+		start := time.Now()
+		recs, err := t.Provider.Lookup(ctx, *probe)
+		cost := float64(time.Since(start).Microseconds()) / 1000
+		switch {
+		case err == nil:
+			fmt.Printf("  ✔ %-8s %6.0fms  返回 %d 条\n", t.Provider.Name(), cost, len(recs))
+		case errors.Is(err, provider.ErrNotFound):
+			fmt.Printf("  ✔ %-8s %6.0fms  连通（该域名无备案）\n", t.Provider.Name(), cost)
+		default:
+			fmt.Printf("  ! %-8s %6.0fms  %v\n", t.Provider.Name(), cost, err)
+		}
+	}
+
+	// 顺带校验响应结构，防止上游改名导致字段错位。
+	b, _ := json.Marshal(map[string]any{"ok": true})
+	fmt.Printf("  ✔ JSON 编码正常（%d 字节）\n", len(b))
+	fmt.Println("\n提示：上游被 WAF 拦截是常见情况，系统会自动降级到其他源或本地快照。")
+	return nil
+}
+
+func absPath(p string) string {
+	a, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return a
+}

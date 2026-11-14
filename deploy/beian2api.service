@@ -1,0 +1,34 @@
+[Unit]
+Description=Beian2API - ICP 备案查询接口
+Documentation=https://cnb.cool/asoe/TechSauce/Beian2Api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 建议用独立的低权限用户运行
+User=beian2api
+Group=beian2api
+WorkingDirectory=/opt/beian2api
+ExecStart=/opt/beian2api/beian2api serve
+Restart=on-failure
+RestartSec=3
+# 优雅停机：等待进行中的请求完成
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# 配置走环境变量，密钥不落盘在仓库里
+Environment=BEIAN2API_LISTEN=127.0.0.1:8080
+Environment=BEIAN2API_DATA_DIR=/opt/beian2api/data
+# Environment=BEIAN2API_API_KEYS=bk_xxxxxxxx
+
+# 沙箱化
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/beian2api/data
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
