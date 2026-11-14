@@ -473,12 +473,30 @@ function withKey(path) {
     step();
   }
 
+  /* 巡检关掉（watch.enabled=false）时，「立即巡检」按下去只会拿到 503。
+     按钮留着不变，用户会以为是自己点错了或者服务坏了。这里直接把它按死，
+     并把原因写在 title 上——按钮的可用状态本身就是一句说明。 */
+  function syncRunButton(d) {
+    var btn = $('#w-run');
+    if (!btn) return;
+    if (d && d.enabled === false) {
+      btn.disabled = true;
+      btn.textContent = '巡检已关闭';
+      btn.title = '配置里 watch.enabled = false，服务不会自动比对。改回 true 并重启即可恢复。';
+    } else if (btn.textContent === '巡检已关闭') {
+      btn.disabled = false;
+      btn.textContent = '立即巡检';
+      btn.title = '';
+    }
+  }
+
   function loadWatch() {
     if (!wList) return;
     fetchWatch(wShowAll ? 0 : wWant, function (items, d) {
       lastStatus = d;
       $('#w-total').textContent = num(d.total) + ' 个';
       rhythm(d);
+      syncRunButton(d);
       wList.innerHTML = '';
       if (!items.length) {
         wList.appendChild(el('div', 'hint small-hint', '还没有监控域名。查询到结果后点「加入监控」，备案变更会推送给你。'));
@@ -561,7 +579,12 @@ function withKey(path) {
         })
         .catch(function (e) { runBtn.textContent = '失败：' + e.message; })
         .finally(function () {
-          setTimeout(function () { runBtn.disabled = false; runBtn.textContent = '立即巡检'; }, 2200);
+          // 复位时别把「巡检已关闭」那句改回去：按钮的可用状态是配置的投影，
+          // 不是一次点击的临时状态。
+          setTimeout(function () {
+            runBtn.textContent = '立即巡检';
+            syncRunButton(lastStatus);
+          }, 2200);
         });
     };
   }
@@ -734,12 +757,15 @@ function withKey(path) {
   'use strict';
   var form = document.getElementById('vform');
   var input = document.getElementById('vc');
+  var domInput = document.getElementById('vd');
   var box = document.getElementById('vresult');
   if (!form) return;
 
   // 414px 下完整示例占位文字会被输入框裁掉半截，换一个更短的说法。
-  if (window.matchMedia('(max-width: 480px)').matches && input.dataset.short) {
-    input.placeholder = input.dataset.short;
+  if (window.matchMedia('(max-width: 480px)').matches) {
+    [input, domInput].forEach(function (el) {
+      if (el && el.dataset.short) el.placeholder = el.dataset.short;
+    });
   }
 
   function kv(list) {
@@ -800,8 +826,19 @@ function withKey(path) {
         c.style.color = 'var(--ok)';
         c.style.background = 'rgba(5,150,105,.1)';
         c.style.borderColor = 'rgba(5,150,105,.24)';
+      } else if (d.cross_check.same_subject) {
+        // 主体对得上、站点序号对不上：这是伪造备案号最常见的样子
+        // （拿一家真实存在的主体号，只改尾数）。只说「不一致」会把
+        // 这层信息丢掉——用户看到实际号，才知道差在哪一位。
+        //
+        // 用红色而不是 notice 的黄色：黄色的语义是「注意」，而这里是一条
+        // 否定结论——它和「✓ 一致」必须是两种一眼能分辨的颜色。
+        c.className = 'err-box';
+        c.textContent = '✗ 主体对得上，但不是同一个网站。该域名实际备案号：'
+          + (d.cross_check.actual || '未查到');
       } else {
-        c.textContent = '✗ 与该域名的实际备案号不一致，实际为：' + (d.cross_check.actual || '未查到');
+        c.className = 'err-box';
+        c.textContent = '✗ 与该域名的实际备案号完全不一致，实际为：' + (d.cross_check.actual || '未查到');
       }
       card.appendChild(c);
     }
@@ -820,11 +857,15 @@ function withKey(path) {
     var v = input.value.trim();
     if (!v) return;
     box.innerHTML = '<div class="hint">校验中…</div>';
+    // 顺带把可选的域名带上：只有它能让「结构合法」升级成「真的是这个域名的」。
+    var domain = domInput ? domInput.value.trim() : '';
+    var url = '/api/v1/verify?code=' + encodeURIComponent(v);
+    if (domain) url += '&domain=' + encodeURIComponent(domain);
     // 同步异常（比如拼接 URL 时出错）不能让它停在「校验中…」：
     // 那是界面上最糟的一种状态——既没说成功，也没说失败，用户只能干等。
     var req;
     try {
-      req = fetch(withKey('/api/v1/verify?code=' + encodeURIComponent(v)));
+      req = fetch(withKey(url));
     } catch (err) {
       showFail(err && err.message ? err.message : String(err));
       return;

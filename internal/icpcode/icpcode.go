@@ -255,6 +255,28 @@ func parse(s string, info *Info) bool {
 	return len(info.Issues) == 0
 }
 
+// Match 判断两个备案号是否是「同一个备案」——主体相同，且站点序号也对得上。
+//
+// Same 只比对主体（省份 + 主体序号），它回答的是「是不是同一家公司」。
+// 而 /api/v1/verify 的交叉核对问的是另一件事：**这个域名上挂的备案号是不是真的那个**。
+// 一个主体下有多个网站时，`-1` 和 `-7` 是同一家公司、但属于不同站点；
+// 拿 `-7` 去冒充只备了 `-1` 的域名，正是这套功能该抓出来的伪造。
+// 之前核对用的是 Same，于是这种情况一路返回「✓ 与实际备案号一致」——
+// 假备案号被自己的校验器盖了章，比没有这个功能更糟。
+//
+// 站点序号缺失时（只写了主体号，写法本身合法）退回到主体比对：
+// 这种情况下无法证明他填错，不该武断判假。
+func Match(a, b string) bool {
+	ia, ib := Parse(a), Parse(b)
+	if !Same(a, b) {
+		return false
+	}
+	if ia.SiteSeq == "" || ib.SiteSeq == "" {
+		return true
+	}
+	return ia.SiteSeq == ib.SiteSeq
+}
+
 // Same 判断两个备案号是否属于同一主体（忽略站点序号）。
 func Same(a, b string) bool {
 	ia, ib := Parse(a), Parse(b)

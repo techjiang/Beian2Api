@@ -182,3 +182,48 @@ func TestCLIAllCommandsAcceptConfigShorthand(t *testing.T) {
 		}
 	}
 }
+
+// -h / --help 不是错误，必须走 stdout 且退出码为 0。
+//
+// 之前：flag 包返回 flag.ErrHelp，main 当成普通错误处理，于是
+// `beian2api serve -h` 先打一遍用法、再补一行「错误: flag: help requested」并以
+// exit 1 结束；而且用法本身是写到 stderr 的，`serve -h | less` 里一片空白。
+func TestCLIHelpFlagIsNotAnError(t *testing.T) {
+	bin := buildBinary(t)
+	for _, name := range []string{"serve", "doctor", "backup", "export", "import", "keygen", "config"} {
+		cmd := exec.Command(bin, name, "-h")
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "BEIAN2API_DATA_DIR="+t.TempDir())
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s -h 应以 0 退出: %v（stderr: %s）", name, err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "用法: beian2api "+name) {
+			t.Fatalf("%s -h 的用法应打到 stdout，实际 stdout=%q stderr=%q", name, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), "help requested") {
+			t.Fatalf("%s -h 不该把「求帮助」报成错误: %s", name, stderr.String())
+		}
+	}
+}
+
+// 未知命令的用法要去 stderr：它跟着一条错误一起出现，别混进 stdout。
+func TestCLIUnknownCommandUsageGoesToStderr(t *testing.T) {
+	bin := buildBinary(t)
+	cmd := exec.Command(bin, "nosuchcmd")
+	cmd.Dir = t.TempDir()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatal("未知命令应失败")
+	}
+	if stdout.String() != "" {
+		t.Fatalf("未知命令不该往 stdout 写东西: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "未知命令") {
+		t.Fatalf("错误信息应出现在 stderr: %q", stderr.String())
+	}
+}

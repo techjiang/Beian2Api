@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,13 +18,13 @@ import (
 
 // cmdBackup 生成一致性快照（bbolt 事务级拷贝，可以在运行时执行）。
 func cmdBackup(args []string) error {
-	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	fs := newFlags("backup")
 	cfgPath := fs.String("config", "", "配置文件路径")
 	fs.StringVar(cfgPath, "c", "", "配置文件路径")
 	out := fs.String("o", "", "输出文件路径（默认 data/backups/beian2api-<时间>.db）")
 	server := fs.String("server", "", "通过运行中的服务做在线备份，如 http://127.0.0.1:8080")
 	key := fs.String("key", "", "服务启用鉴权时的 API Key")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *server != "" {
@@ -63,11 +62,11 @@ func cmdBackup(args []string) error {
 // 迁完监控列表、历史快照、变更流水、推送状态全没了。现在导的是完整快照，
 // 并且在一个读事务里取，导出来的是某一时刻的一致状态。
 func cmdExport(args []string) error {
-	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	fs := newFlags("export")
 	cfgPath := fs.String("config", "", "配置文件路径")
 	fs.StringVar(cfgPath, "c", "", "配置文件路径")
 	out := fs.String("o", "beian2api-export.json", "输出文件路径")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	_, st, err := bootstrap(*cfgPath)
@@ -99,11 +98,11 @@ func cmdExport(args []string) error {
 
 // cmdImport 从 JSON 恢复全部数据。
 func cmdImport(args []string) error {
-	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	fs := newFlags("import")
 	cfgPath := fs.String("config", "", "配置文件路径")
 	fs.StringVar(cfgPath, "c", "", "配置文件路径")
 	in := fs.String("i", "beian2api-export.json", "输入文件路径")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	_, st, err := bootstrap(*cfgPath)
@@ -160,9 +159,9 @@ func decodeDump(r io.Reader) (*store.Dump, error) {
 
 // cmdKeygen 生成随机 API Key。
 func cmdKeygen(args []string) error {
-	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
+	fs := newFlags("keygen")
 	n := fs.Int("n", 1, "生成数量")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	for i := 0; i < *n; i++ {

@@ -61,12 +61,19 @@ func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// isLoopback 判断这次请求是不是真的从本机发起的。
+//
+// 只看 TCP 对端地址，不看任何转发头——包括开了 trust_proxy 之后。
+// 理由：文档里承诺的是「只允许本机直连」，而这个判断守护的是「能往磁盘写文件」。
+// 一旦采信转发头，任何能直接连到端口的人只要写一行 `X-Forwarded-For: 127.0.0.1`
+// 就拿到了备份能力（哪怕开了 trust_proxy，那条头也是他自己填的）。
+// 换句话说：这一条不需要「真实客户端 IP」，需要的是「你是不是从本机连过来的」，
+// 而这两件事在反向代理后面天然不同——经过反代的请求本来就不是本机直连。
 func (s *Server) isLoopback(r *http.Request) bool {
-	if !s.cfg.TrustProxy && r.Header.Get("X-Forwarded-For") != "" {
-		// 未声明可信代理时不采信任何转发头，宁可拒绝。
-		return false
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	host := s.clientIP(r)
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }

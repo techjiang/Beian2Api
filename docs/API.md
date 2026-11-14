@@ -167,7 +167,7 @@ curl -X POST "http://localhost:8080/api/v1/batch" \
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
 | code | 是 | 备案号，也接受 `icp` 作为参数名 |
-| domain | 否 | 传入后会与该域名的实际备案号比对 |
+| domain | 否 | 传入后会与该域名的实际备案号比对（首页校验框的第二个输入框就是它） |
 
 ```bash
 curl "http://localhost:8080/api/v1/verify?code=京ICP备12345678号-1"
@@ -191,6 +191,7 @@ curl "http://localhost:8080/api/v1/verify?code=京ICP备12345678号-1&domain=exa
     "cross_check": {
       "checked": true,
       "match": true,
+      "same_subject": true,
       "actual": "京ICP备12345678号-1",
       "verified": true
     }
@@ -207,6 +208,21 @@ curl "http://localhost:8080/api/v1/verify?code=京ICP备12345678号-1&domain=exa
 - 纠正过程会在 `fixed` 数组里逐条说明
 
 `valid=false` 时 `issues` 会列出所有不成立的地方。
+
+**`cross_check` 的三个布尔值语义不同，别混用**
+
+| 字段 | 含义 |
+| --- | --- |
+| `checked` | 是否真的查了域名。为 `false` 时看 `reason`（域名不合法、上游不可用等） |
+| `match` | **整条备案号**是否一致，含 `-N` 站点序号 |
+| `same_subject` | 是否同一主体（省份 + 主体序号相同，忽略站点序号） |
+
+`match` 要求站点序号也一致，因为 `/verify` 回答的是「这个域名上挂的备案号是不是真的那一个」。
+一个主体下可以有多个网站，`-1` 和 `-7` 是同一家公司、不同站点——拿真实存在的 `-1`
+改个尾数写成 `-7` 去冒充另一个域名，结构合法、主体也对得上，而这正是伪造备案号
+最常见的样子。只比对主体会给这种伪造盖章「一致」。
+
+备案号里没有站点序号时（`京ICP备12345678号`，写法本身合法），`match` 退回主体比对。
 
 ---
 
@@ -262,7 +278,10 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 `offset` 不是非负整数时返回 400（`invalid_offset`）。不能静默当成 0：
 翻页客户端会把第一页当成第 N 页，然后无限循环。
 
-巡检未启用时该接口依然可用，返回 `enabled=false`，不会 404。
+巡检未启用（`watch.enabled=false`）时该接口依然可用：`enabled=false`、`interval=0`、
+`running=false`，但 **`items` / `total` 照常返回库里真实存在的监控项**。
+「有没有在自动巡检」和「监控着哪些域名」是两件事，不能因为前者关掉就把后者答成空——
+那样首页会显示「还没有监控域名」，而库里明明躺着数据，用户只会以为自己加丢了。
 
 ## GET /api/v1/watch/list
 
@@ -514,6 +533,17 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
 
 ---
 
+## 访问日志
+
+`log_level: info`（默认）下，每个 `/api/*` 请求会输出一行访问日志：
+
+```
+level=INFO msg=http method=GET path=/api/v1/query status=200 ms=12.4 ip=203.0.113.7
+```
+
+`debug` 下所有请求（含静态资源与探针）都会记录。之前这行日志在默认配置下从不出现——
+条件判断写了「info 级别下的 /api 请求」，输出却用的 `Debug`，被 handler 直接丢掉了。
+
 ## 鉴权与限流
 
 配置了 `auth.keys` 或环境变量 `BEIAN2API_API_KEYS` 后（两者都会自动打开 `auth.enabled`，
@@ -542,6 +572,10 @@ API Key 输入框，填一次就存在浏览器本地，后续请求自动带上
 
 限流按客户端 IP 做令牌桶，默认 20 rps / burst 60。被限时返回 429 与 `Retry-After`。
 健康检查与静态页面不受限流影响；`/api` 与 `/badge` 都算。
+
+限流按客户端 IP 分桶。`trust_proxy: false`（默认）时用 TCP 对端地址；
+打开后取 `X-Forwarded-For` 的**末段**——这个头是链式的，代理把自己的对端地址追加到末尾，
+首段永远是客户端自己填的，只取首段等于把「自称的 IP」当身份。
 
 ## CORS
 

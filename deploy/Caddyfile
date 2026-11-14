@@ -3,6 +3,8 @@ beian.example.com {
     encode zstd gzip
     reverse_proxy 127.0.0.1:8080 {
         header_up X-Real-IP {remote_host}
+        # Caddy 默认会 append 客户端自带的 X-Forwarded-For，这里显式覆盖成
+        # 「只有真实对端地址」一个值，配合服务端「只认末段」的策略不会出错。
         header_up X-Forwarded-For {remote_host}
     }
     header {

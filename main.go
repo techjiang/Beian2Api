@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,6 +28,15 @@ var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		// -h / --help 不是错误。
+		//
+		// flag 包在遇到 -h 时返回 flag.ErrHelp，而这里把它当普通错误处理，
+		// 于是 `beian2api serve -h` 会先打一遍用法、再打一行「错误: flag: help requested」
+		// 并以退出码 1 结束。对脚本和习惯用 `cmd -h | less` 的人来说，
+		// 「求帮助」变成「失败」——这不该算错。
+		if errors.Is(err, flag.ErrHelp) || errors.Is(err, errHelpShown) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
@@ -56,16 +66,21 @@ func run(args []string) error {
 	case "doctor":
 		return cmdDoctor(args)
 	case "help", "-h", "--help":
-		usage()
+		usage(os.Stdout)
 		return nil
 	default:
-		usage()
+		// 未知命令时用法去 stderr：它跟着一条错误一起出现，不该混进 stdout。
+		usage(os.Stderr)
 		return fmt.Errorf("未知命令 %q", cmd)
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `Beian2API — 轻量自托管的 ICP 备案查询 API
+// usage 输出总帮助。
+//
+// 分开 stdout / stderr 是因为 `beian2api help | less` 是一种正常用法：
+// 把帮助一律打到 stderr，管道里就只剩下一片空白，用户会以为命令坏了。
+func usage(w io.Writer) {
+	fmt.Fprint(w, `Beian2API — 轻量自托管的 ICP 备案查询 API
 
 用法:
   beian2api [命令] [参数]
@@ -94,7 +109,47 @@ func usage() {
 `)
 }
 
-// logger 按配置创建结构化日志。
+// newFlags 构造子命令的参数集合，并把 -h / --help 的用法打到 stdout。
+//
+// flag 包默认把「用法」和「参数写错」都写到 stderr。于是：
+//   - `beian2api serve -h | less` 里一片空白（帮助是正常输出，该走 stdout）；
+//   - `beian2api doctor -badflag` 的用法跑到 stdout，和错误信息分了家。
+//
+// 两者的区别只有一处：结局是「求帮助」还是「出错了」。所以这里把 flag 包的
+// 全部输出先攒进 buffer，等 Parse 返回后再按结局分别投递——一个入口，
+// 两条路各归各位，子命令里只需要写 `if err := parseFlags(fs, args); err != nil`。
+func newFlags(name string) *flag.FlagSet {
+	return flag.NewFlagSet(name, flag.ContinueOnError)
+}
+
+// errHelpShown 表示「帮助已经打完了，别再往下跑」。
+//
+// 不能简单 return nil：`serve -h` 之后会继续加载配置、开监听——
+// 一个只想看用法的人会得到一个在前台跑着的服务，还以为命令卡住了。
+var errHelpShown = errors.New("help shown")
+
+// parseFlags 解析参数，并把帮助 / 错误分别投递到 stdout 与 stderr。
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	var buf strings.Builder
+	fs.SetOutput(&buf)
+	fs.Usage = func() {
+		fmt.Fprintf(&buf, "用法: beian2api %s [参数]\n", fs.Name())
+		fs.PrintDefaults()
+	}
+	err := fs.Parse(args)
+	if buf.Len() == 0 {
+		return err
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		// 求帮助不是失败：用法去 stdout，再用「已处理」信号让调用方停下。
+		fmt.Fprint(os.Stdout, buf.String())
+		return errHelpShown
+	}
+	// 参数写错：错误信息与用法一起落到 stderr，别混进管道里的数据。
+	fmt.Fprint(os.Stderr, buf.String())
+	return err
+}
+
 func logger(level string) *slog.Logger {
 	var lv slog.Level
 	switch level {
@@ -193,10 +248,10 @@ func baseURL(cfg *config.Config) string {
 }
 
 func cmdServe(args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs := newFlags("serve")
 	cfgPath := fs.String("config", "", "配置文件路径")
 	fs.StringVar(cfgPath, "c", "", "配置文件路径")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -317,10 +372,10 @@ func cmdServe(args []string) error {
 }
 
 func cmdConfig(args []string) error {
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs := newFlags("config")
 	cfgPath := fs.String("config", "", "配置文件路径")
 	fs.StringVar(cfgPath, "c", "", "配置文件路径")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	cfg, err := config.Load(*cfgPath)

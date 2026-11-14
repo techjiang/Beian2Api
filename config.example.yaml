@@ -9,6 +9,10 @@ base_url: ""           # 对外访问地址，用于生成 OpenAPI 里的 server
 
 # 只有在反向代理后面才打开。打开后才采信 X-Forwarded-For / X-Real-IP，
 # 否则限流的 key 就成了客户端自己填的头——每个请求换个头就换一桶令牌。
+#
+# 打开后也只认 X-Forwarded-For 的「末段」：这个头是链式的，代理把自己的对端地址
+# 追加到末尾，首段永远是客户端自己填的。nginx 的 $proxy_add_x_forwarded_for
+# 就是这么做的，直接用它即可。
 trust_proxy: false
 
 cache:

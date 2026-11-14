@@ -228,3 +228,39 @@ func TestFrontendKeyBoxStaysUntilVerified(t *testing.T) {
 		t.Fatal("验证通过之后才收起 keybox")
 	}
 }
+
+// 校验器必须能带上域名做交叉核对。
+//
+// 「这个备案号结构合法」和「这个号真是这个域名的」是两件事，后者才是
+// 识别伪造备案号的关键（拿一家真实主体号改个尾数，结构完全合法）。
+// 后端 /api/v1/verify 早就支持 domain 参数，但界面上没有入口，
+// 这个能力只能靠 curl 手动带参数用——功能在、用户摸不到，等于没有。
+func TestFrontendVerifySendsDomain(t *testing.T) {
+	src := string(mustAsset(t, "app.js"))
+	if !strings.Contains(src, "getElementById('vd')") {
+		t.Fatal("校验器要读域名输入框 #vd")
+	}
+	// 这里不能用 stripCommentsAndStrings：'&domain=' 本身就在字符串字面量里。
+	// 校验器那一段里必须同时出现域名输入框的读取与参数拼接。
+	i := strings.Index(src, "var domInput")
+	if i < 0 {
+		t.Fatal("找不到校验器里读域名输入框的代码")
+	}
+	// 拼参数那一步必须出现在校验器里（读输入框之后、IIFE 结束之前）。
+	rest := src[i:]
+	if strings.Contains(rest, "\n})();") {
+		rest = rest[:strings.Index(rest, "\n})();")]
+	}
+	if !strings.Contains(rest, "'&domain='") {
+		t.Fatal("校验请求要带上 domain 参数，否则交叉核对永远用不上")
+	}
+	html := string(mustAsset(t, "index.html"))
+	if !strings.Contains(html, `id="vd"`) {
+		t.Fatal("index.html 里要有域名输入框 #vd")
+	}
+	// 可选字段不能 required，否则只查备案号结构也得先填个域名。
+	hi := strings.Index(html, `id="vd"`)
+	if strings.Contains(html[hi-200:hi], "required") {
+		t.Fatal("域名是可选项，输入框不能 required")
+	}
+}

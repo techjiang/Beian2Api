@@ -50,6 +50,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.2-2.9 7.8-7 9-4.1-1.2-7-4.8-7-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
         <input id="vc" type="text" placeholder="校验备案号，如 京ICP备12345678号-1" data-short="校验备案号真伪" spellcheck="false" required>
       </label>
+      <!-- 域名是可选的第二项：填了才会去查这个域名实际挂的备案号做交叉核对。
+           「这个号结构合法」和「这个号真是这个域名的」是两件事，后者才是
+           识别伪造备案号的关键——而之前它只能靠 curl 手动带 domain 参数。 -->
+      <label class="field field-domain">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></svg>
+        <input id="vd" type="text" placeholder="域名（可选）" data-short="域名（可选）" title="填了才会去查这个域名实际挂的备案号，用来识别张冠李戴" spellcheck="false">
+      </label>
       <button id="vgo" type="submit" class="ghost" style="padding:13px 20px">校验</button>
     </form>
     <div id="vresult"></div>

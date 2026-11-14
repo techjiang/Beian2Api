@@ -770,3 +770,121 @@ func TestChangesSinceStopsAtFirstOlderEvent(t *testing.T) {
 		}
 	}
 }
+
+// 开了 trust_proxy 也不能采信 X-Forwarded-For 的第一段。
+//
+// 这个头是链式的：反向代理把「它看到的对端地址」追加到末尾，
+// 而第一段是客户端自己填的。之前取的是第一段，于是开了 trust_proxy 的部署
+// 只要伪造 `X-Forwarded-For: 1.2.3.4` 就能每个请求换一桶限流令牌。
+func TestRateLimitIgnoresForgedFirstHopEvenWithTrustProxy(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) {
+		c.TrustProxy = true
+		c.RateLimit.Enabled = true
+		c.RateLimit.RPS = 1
+		c.RateLimit.Burst = 2
+	})
+	// 每条请求都换一个伪造的首段，但末段（代理亲手写的真实地址）不变。
+	var codes []int
+	for i := 0; i < 6; i++ {
+		resp, _ := get(t, h, "/api/v1/query?domain=example.com",
+			map[string]string{"X-Forwarded-For": fmt.Sprintf("10.9.9.%d, 203.0.113.7", i)})
+		codes = append(codes, resp.StatusCode)
+	}
+	last := codes[len(codes)-1]
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("末段相同就该共用一个桶、最终 429，实际 %v", codes)
+	}
+
+	// 末段确实变化时，才应该换桶。
+	if resp, _ := get(t, h, "/api/v1/query?domain=example.com",
+		map[string]string{"X-Forwarded-For": "1.1.1.1, 198.51.100.9"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("末段不同应换桶放行，实际 %d", resp.StatusCode)
+	}
+}
+
+// 开了 trust_proxy，备份接口也必须只认真正的本机直连。
+//
+// 「允许本机访问」守的是「能往磁盘写文件」。一旦采信转发头，
+// 任何能直连端口的人写一行 X-Forwarded-For: 127.0.0.1 就拿到了备份能力。
+func TestAdminBackupIgnoresForwardedHeaderEvenWithTrustProxy(t *testing.T) {
+	_, h := mkServer(t, func(c *config.Config) { c.TrustProxy = true })
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/backup", nil)
+	req.RemoteAddr = "203.0.113.7:5555" // 对端不是本机
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("伪造 X-Forwarded-For 不应拿到备份能力，实际 %d: %s", w.Code, w.Body.String())
+	}
+	_ = h
+}
+
+// 关掉巡检也要能看见「监控了哪些域名」。
+//
+// `watch.enabled=false` 时 status 之前返回 total=0 / items=[]，
+// 首页监控面板于是永远显示「还没有监控域名」——用户会以为自己加的域名丢了。
+func TestWatchStatusListsItemsWhenWatchDisabled(t *testing.T) {
+	_, h := mkServer(t, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/watch", strings.NewReader(`{"domain":"example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("加入监控失败 %d: %s", w.Code, w.Body.String())
+	}
+	// mkServer 传的 Watch 是 nil，等价于巡检未启用。
+	_, body := get(t, h, "/api/v1/watch/status", nil)
+	var out struct {
+		Data struct {
+			Enabled bool `json:"enabled"`
+			Total   int  `json:"total"`
+			Items   []struct {
+				Domain string `json:"domain"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.Enabled {
+		t.Fatal("巡检未启用时 enabled 应为 false")
+	}
+	if out.Data.Total != 1 || len(out.Data.Items) != 1 || out.Data.Items[0].Domain != "example.com" {
+		t.Fatalf("关掉巡检仍要如实列出监控项，实际 %s", body)
+	}
+}
+
+// 交叉核对必须能区分「同主体不同站点」。
+//
+// 假数据源给 example.com 备的是 京ICP备1号-1。拿 京ICP备1号-7 去核对，
+// 之前返回 match=true——同一个主体、但站点序号对不上，这恰恰是伪造备案号
+// 最常见的样子（拿主体真实存在的号改个尾数），而校验器给它盖了章。
+func TestVerifyCrossCheckComparesSiteSeq(t *testing.T) {
+	_, h := mkServer(t, nil)
+	type cc struct {
+		Data struct {
+			CrossCheck struct {
+				Checked     bool `json:"checked"`
+				Match       bool `json:"match"`
+				SameSubject bool `json:"same_subject"`
+			} `json:"cross_check"`
+		} `json:"data"`
+	}
+	parse := func(code string) cc {
+		_, body := get(t, h, "/api/v1/verify?code="+url.QueryEscape(code)+"&domain=example.com", nil)
+		var out cc
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		return out
+	}
+
+	if got := parse("京ICP备1号-1"); !got.Data.CrossCheck.Match {
+		t.Fatal("完全相同的备案号应 match=true")
+	}
+	if got := parse("京ICP备1号-7"); got.Data.CrossCheck.Match {
+		t.Fatal("同主体不同站点序号必须 match=false，否则伪造的号会被自己的校验器盖章")
+	} else if !got.Data.CrossCheck.SameSubject {
+		t.Fatal("same_subject 应仍为 true（是同一家公司，只是站点不同）")
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,11 +16,11 @@ import (
 
 // cmdDoctor 做部署自检：配置是否可读、目录是否可写、各上游是否可达。
 func cmdDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs := newFlags("doctor")
 	cfgPath := fs.String("config", "", "配置文件路径")
 	fs.StringVar(cfgPath, "c", "", "配置文件路径")
 	probe := fs.String("domain", "example.com", "用于探测上游的域名")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	cfg, st, err := bootstrap(*cfgPath)

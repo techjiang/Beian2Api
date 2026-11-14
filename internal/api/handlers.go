@@ -323,11 +323,27 @@ func (s *Server) handleWatchStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	// 巡检关掉时也要如实报出「监控了哪些域名」。
+	//
+	// 之前这里直接返回 total=0、items=[]：结果是关掉巡检的部署，首页监控面板
+	// 永远显示「0 个 · 还没有监控域名」，而库里明明躺着监控项——用户会以为
+	// 自己加的域名丢了，或者以为「加监控」这个按钮坏了。
+	// 「有没有在自动巡检」和「监控着哪些域名」是两件事，得分开回答。
 	if s.watch == nil {
+		items, err := s.svc.Store().ListWatchPage(limit, offset)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
+			return
+		}
+		if items == nil {
+			items = []store.WatchItem{}
+		}
+		total, _ := s.svc.Store().CountWatch()
 		writeOK(w, map[string]any{
-			"enabled": false, "total": 0, "interval": 0, "offset": 0, "limit": limit, "has_more": false,
+			"enabled": false, "total": total, "interval": 0,
+			"offset": offset, "limit": limit, "has_more": limit > 0 && offset+len(items) < total,
 			"running": false, "last_run_at": 0, "last_count": 0, "next_run_at": 0,
-			"items": []any{},
+			"items": items,
 		})
 		return
 	}

@@ -269,8 +269,14 @@ footer.foot .sp { margin-left: auto; }
 /* 推送失败的原文（上游 errcode / errmsg）要能读，但别抢变更正文的视觉权重。 */
 .err-text { color: var(--err); word-break: break-word; font-size: 12px; }
 
+/* 校验框里的域名那一格比备案号短：备案号是主角，域名是可选的补充。
+   给个上限，别让一行里两个等宽的输入框抢焦点。 */
+.field-domain { flex: 0 1 200px; }
+
 @media (max-width: 640px) {
   .wrap { padding: 14px 14px 48px; }
+  /* 小屏上两格都占满一行，谁也别挤谁。 */
+  .field-domain { flex: 1 1 100%; }
   header.top { gap: 8px; padding-bottom: 20px; flex-wrap: nowrap; }
   header.top img { width: 34px; height: 34px; }
   header.top .brand { font-size: 16px; }

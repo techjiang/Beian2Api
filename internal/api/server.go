@@ -105,15 +105,30 @@ func (s *Server) Handler() http.Handler {
 	return s.withCommon(s.logRequests(mux))
 }
 
+// logRequests 记录访问日志。
+//
+// 这里有个藏了很久的哑巴：条件判断写着「debug 级别，或 info 级别下的 /api 请求」，
+// 但真正输出用的是 `s.log.Debug`，而 log_level=info 时 Debug 记录会被 handler
+// 直接丢掉——于是默认配置下**一条访问日志都不会出现**。条件里那半个分支
+// 从来没生效过，看起来「API 请求会被记录」，实际上什么都没有。
+//
+// 现在按级别分开：API 请求在 info 下用 Info 记录，其余（静态资源、探针）
+// 仍然只在 debug 下可见。默认级别下能看到「谁在打哪个接口、多快、返回什么」，
+// 这是排障时最先要看的东西。
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, code: 200}
 		next.ServeHTTP(sw, r)
-		if s.cfg.LogLevel == "debug" || (s.cfg.LogLevel == "info" && strings.HasPrefix(r.URL.Path, "/api/")) {
-			s.log.Debug("http",
-				"method", r.Method, "path", r.URL.Path, "status", sw.code,
-				"ms", float64(time.Since(start).Microseconds())/1000, "ip", s.clientIP(r))
+		ms := float64(time.Since(start).Microseconds()) / 1000
+		apiPath := strings.HasPrefix(r.URL.Path, "/api/")
+		switch {
+		case s.cfg.LogLevel == "debug":
+			s.log.Debug("http", "method", r.Method, "path", r.URL.Path,
+				"status", sw.code, "ms", ms, "ip", s.clientIP(r))
+		case s.cfg.LogLevel == "info" && apiPath:
+			s.log.Info("http", "method", r.Method, "path", r.URL.Path,
+				"status", sw.code, "ms", ms, "ip", s.clientIP(r))
 		}
 	})
 }
