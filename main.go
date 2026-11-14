@@ -273,7 +273,7 @@ func cmdServe(args []string) error {
 		"listen", cfg.Listen,
 		"data", st.Path(),
 		"providers", cfg.EnabledProviders(),
-		"auth", len(cfg.Auth.Keys) > 0,
+		"auth", cfg.Auth.Enabled,
 	)
 
 	errCh := make(chan error, 1)

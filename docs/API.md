@@ -513,7 +513,8 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
 
 ## 鉴权与限流
 
-配置了 `auth.keys` 或环境变量 `BEIAN2API_API_KEYS` 后，所有 `/api` 接口都需要 Key：
+配置了 `auth.keys` 或环境变量 `BEIAN2API_API_KEYS` 后（两者都会自动打开 `auth.enabled`，
+或在 yaml 里显式写 `enabled: true`），所有 `/api` 接口都需要 Key：
 
 ```bash
 curl -H "X-API-Key: bk_xxx" "http://localhost:8080/api/v1/query?domain=example.com"
@@ -528,7 +529,13 @@ curl "...&key=bk_xxx"
 ```
 
 开了鉴权之后网页仍然可以正常用：首页依旧是公开的，检测到 401 时会露出一个
-API Key 输入框，填一次就存在浏览器本地，后续请求自动带上。
+API Key 输入框，填一次就存在浏览器本地，后续请求自动带上。保存时会立刻发一次请求
+验证，界面直接告诉你「Key 有效」还是「无效」——填错了跟没填一样，若只提示
+「已保存」，你要等到下一次刷新才发现还是 401。
+
+`auth.enabled` 与 `auth.keys` 必须同时成立，只写一半会**拒绝启动**：
+只开开关而没 Key，等于没有任何可校验的凭据、接口全裸；只配 Key 而忘了开开关，
+你以为在保护其实对外公开。这两种状态都比「没配鉴权」更危险，所以宁可起不来。
 
 限流按客户端 IP 做令牌桶，默认 20 rps / burst 60。被限时返回 429 与 `Retry-After`。
 健康检查与静态页面不受限流影响；`/api` 与 `/badge` 都算。

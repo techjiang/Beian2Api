@@ -284,3 +284,58 @@ func TestRecordHistoryPrimaryIsStable(t *testing.T) {
 		t.Fatalf("应记录站点序号最小的那条，实际 %s", hist[0].ICPCode)
 	}
 }
+
+// 调用方自己走了，不该拿到一份「上游挂了」的快照。
+//
+// 这条和 provider 里 Cancelled 的分支是一对：provider 已经把「调用方不等了」
+// 从 AllFailed 里摘出来，但 service 在它之前就回退了本地快照——巡检拿到一份
+// stale 结果，看到 Found 为真、指纹没变，接着按「stale 计入失败」的规则
+// 记一次上游故障。一个完全正常的域名，因为浏览器关了个页面，被推了告警。
+func TestCancelledDoesNotReturnStaleSnapshot(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备1号-1")}, delay: 300 * time.Millisecond}
+	svc, st := newSvc(t, provider.Task{Provider: s, Timeout: 5 * time.Second})
+
+	// 先查一次，把一条「已过期但仍在回退窗口内」的快照留在库里。
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	e, err := st.GetCache("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.ExpireAt = model.Now() - 10
+	if err := st.PutCache(e); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(40 * time.Millisecond); cancel() }()
+	res, err := svc.Query(ctx, "example.com", Options{Refresh: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消应如实返回 ctx 错误，实际 err=%v res=%+v", err, res)
+	}
+	if res != nil {
+		t.Fatalf("取消不该返回任何结果（尤其不该是 stale 快照），实际 %+v", res)
+	}
+}
+
+// 取消也不该被算进 stale 计数器：那个数是「上游顶不住了」的证据，
+// 混进调用方自己走的次数就会失真。
+func TestCancelledDoesNotCountStale(t *testing.T) {
+	s := &stub{recs: []model.Record{rec("京ICP备1号-1")}, delay: 300 * time.Millisecond}
+	svc, st := newSvc(t, provider.Task{Provider: s, Timeout: 5 * time.Second})
+	if _, err := svc.Query(context.Background(), "example.com", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := st.GetCache("example.com")
+	e.ExpireAt = model.Now() - 10
+	_ = st.PutCache(e)
+
+	before := st.Stat("stale")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(40 * time.Millisecond); cancel() }()
+	_, _ = svc.Query(ctx, "example.com", Options{Refresh: true})
+	if got := st.Stat("stale"); got != before {
+		t.Fatalf("取消不该计入 stale，%d -> %d", before, got)
+	}
+}

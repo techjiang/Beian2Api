@@ -22,10 +22,16 @@ rate_limit:
   burst: 60
 
 auth:
-  enabled: false       # 打开后所有 /api 接口需要 API Key
+  # 打开后所有 /api 接口（含 RSS 与徽章以外的管理接口）都需要 API Key。
+  # enabled 与 keys 必须同时成立：只写 enabled 而没有 Key 会直接拒绝启动，
+  # 因为那种状态没有任何可校验的凭据，接口其实是全裸的。
+  enabled: false
   keys: []
-  # keys:
-  #   - "bk_换成你自己的key"   # 用 `beian2api keygen` 生成
+  # 打开鉴权的示例：
+  #   enabled: true
+  #   keys:
+  #     - "bk_换成你自己的key"   # 用 `beian2api keygen` 生成
+  # 网页端在 401 时会自动露出输入框，填一次存在浏览器里。
 
 cors:
   - "*"                # 生产环境建议改成你的前端域名

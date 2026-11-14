@@ -141,6 +141,17 @@ func (s *Service) query(ctx context.Context, domain string, opts Options) (*mode
 		}, nil
 	}
 
+	// 调用方自己走了（断连、超时窗口到点），先于「回退快照」判断。
+	//
+	// 顺序错了会互相抵消上几轮的努力：巡检把 ctx 取消当成「这不是上游的错」，
+	// 而这里先返回了一份 stale 结果，巡检看到的是「结果来了但它是 stale」，
+	// 于是照样记一次失败、连续几轮就推一条「上游异常」出去——正是上一轮
+	// 特意从 provider 里分出去的那个假故障，在 service 这层又被造回来了。
+	// 断连的浏览器也会莫名其妙收到一份 2024 年的旧数据。
+	if out.Cancelled {
+		return nil, ctx.Err()
+	}
+
 	// 全部上游失败：回退到本地快照，哪怕已过期也总比报错强。
 	if cerr == nil && entry != nil {
 		age := now - entry.FetchedAt
@@ -158,12 +169,6 @@ func (s *Service) query(ctx context.Context, domain string, opts Options) (*mode
 				Notice:    "上游数据源暂不可用，已返回本地最后快照（" + time.Unix(entry.FetchedAt, 0).Format("2006-01-02 15:04") + "）",
 			}, nil
 		}
-	}
-
-	// 调用方自己走了（断连、超时）：如实返回 ctx 错误，而不是「上游不可用」。
-	// 后者会让人以为数据源出了问题，实际上是我们不等了。
-	if out.Cancelled {
-		return nil, ctx.Err()
 	}
 
 	detail := "上游数据源均不可用"

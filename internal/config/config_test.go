@@ -351,3 +351,43 @@ func TestProviderCredentialNotSerialized(t *testing.T) {
 		t.Fatalf("应暴露「是否已配凭据」这个事实: %s", b)
 	}
 }
+
+// auth.enabled 为 true 却没有 Key —— 服务端没有任何可校验的凭据，
+// 启动后全站裸奔，而配置文件上明明写着「已开启鉴权」。
+// 这种「看着开了其实没开」必须直接拒绝启动。
+func TestValidateRejectsAuthWithoutKeys(t *testing.T) {
+	c := Default()
+	c.Auth.Enabled = true
+	c.Auth.Keys = nil
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("auth.enabled 为真但没有 keys，应拒绝")
+	}
+	if !strings.Contains(err.Error(), "auth.keys") {
+		t.Fatalf("错误信息应指明该配哪个字段，实际：%v", err)
+	}
+}
+
+// 反过来也一样：Key 配了但 enabled 是 false，接口其实是公开的。
+// 猜用户想要哪个不如直接说出来。
+func TestValidateRejectsKeysWithoutAuthEnabled(t *testing.T) {
+	c := Default()
+	c.Auth.Enabled = false
+	c.Auth.Keys = []string{"bk_x"}
+	if c.Validate() == nil {
+		t.Fatal("配了 keys 但没开鉴权，应拒绝")
+	}
+}
+
+// 正常组合仍然通过：enabled + keys、或两者都空。
+func TestValidateAcceptsAuthCombos(t *testing.T) {
+	on := Default()
+	on.Auth.Enabled, on.Auth.Keys = true, []string{"bk_x"}
+	if err := on.Validate(); err != nil {
+		t.Fatalf("enabled + keys 应通过：%v", err)
+	}
+	off := Default()
+	if err := off.Validate(); err != nil {
+		t.Fatalf("都没配时应通过：%v", err)
+	}
+}

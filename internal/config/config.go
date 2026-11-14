@@ -310,6 +310,19 @@ func (c *Config) Validate() error {
 	if c.Cache.StaleMax == 0 {
 		c.Cache.StaleMax = 604800
 	}
+	// auth.enabled 为真但一把 Key 都没有 —— 这时服务端没有任何可校验的凭据，
+	// 结果是「全站裸奔」，而配置文件上明明写着 enabled: true。
+	// 启动时直接拒绝，比让人以为已经保护好了安全得多。
+	if c.Auth.Enabled && len(c.Auth.Keys) == 0 {
+		return fmt.Errorf("auth.enabled 为 true 但 auth.keys 为空：" +
+			"这样启动等于不鉴权。用 `beian2api keygen` 生成一把，或设 BEIAN2API_API_KEYS")
+	}
+	if !c.Auth.Enabled && len(c.Auth.Keys) > 0 {
+		// 反向的坑：Key 配了、enabled 忘了打开，接口其实是公开的。
+		// 与其猜用户想要哪个，不如直接说出来。
+		return fmt.Errorf("配了 auth.keys 但 auth.enabled 为 false：" +
+			"当前不会鉴权。想要保护请改成 enabled: true，想公开请删掉 keys")
+	}
 	if c.RateLimit.RPS == 0 {
 		c.RateLimit.RPS = 20
 	}

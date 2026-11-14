@@ -262,6 +262,28 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_RETAIN_HISTORY_TOTAL` | `20000` | 历史快照的全局条数上限（跨所有域名） |
 | `BEIAN2API_APIHZ_ID` / `BEIAN2API_APIHZ_KEY` | 空 | apihz 的自有凭据，不填则用公共测试凭据 |
 
+### 开启鉴权
+
+```yaml
+auth:
+  enabled: true
+  keys: ["bk_用 keygen 生成"]
+```
+
+或一行环境变量：`BEIAN2API_API_KEYS=bk_xxx,bk_yyy`。
+
+`enabled` 和 `keys` 必须**同时**成立，只写一半会直接拒绝启动：
+
+- 只开 `enabled` 而 `keys` 为空 → 没有任何可校验的凭据，接口其实是全裸的；
+- 只配 `keys` 而 `enabled: false` → 你以为在保护，其实是公开的。
+
+这种「看着开了其实没开」比不配更危险，所以宁可不启动。
+
+打开后网页端会在 401 时自动露出 Key 输入框，填一次存在你自己的浏览器里，
+保存时会立刻验一次并回话（有效 / 无效 / 浏览器不允许保存）。
+RSS 阅读器不方便带请求头，订阅地址里带 `?key=` 即可。
+徽章 `/badge/icp.svg` 始终公开——README 里的 `<img>` 发不出自定义请求头。
+
 ### 反向代理
 
 `deploy/` 里有现成的 `Caddyfile` 和 `nginx.conf`，都已处理好真实 IP 透传。

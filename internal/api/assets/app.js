@@ -3,13 +3,28 @@
 /* ---- 两个 IIFE 共用的小工具 ----
    页面拆成「查询台」和「备案号校验器」两块各自独立初始化，但两者都要
    带 API Key 请求。这些函数必须在两者之外定义，否则后一个块调前者块里的
-   局部函数会直接 ReferenceError（这正是校验器坏了这么久的原因）。 */
-var b2aKey = (function () {
-  var STORE = 'beian2api.key';
-  return function () {
-    try { return localStorage.getItem(STORE) || ''; } catch (e) { return ''; }
-  };
-})();
+   局部函数会直接 ReferenceError（这正是校验器坏了这么久的原因）。
+
+   KEY_STORE 也必须在这一层：之前它只写在 b2aKey 的闭包里（叫 STORE），
+   而「保存 Key」那段代码引用的是 KEY_STORE——一个从来没声明过的名字。
+   赋值语句抛 ReferenceError，恰好被外层的 try/catch 吞掉，于是：
+   Key 没存进去、输入框不消失、下一次刷新全站 401，而界面上一点错都不报。
+   开了鉴权的部署，网页端等于完全不可用。 */
+var KEY_STORE = 'beian2api.key';
+
+var b2aKey = function () {
+  try { return localStorage.getItem(KEY_STORE) || ''; } catch (e) { return ''; }
+};
+
+function setKey(v) {
+  try {
+    if (v) localStorage.setItem(KEY_STORE, v);
+    else localStorage.removeItem(KEY_STORE);
+    return true;
+  } catch (e) {
+    return false; // 隐私模式下 localStorage 写不了，只对本次会话有效
+  }
+}
 
 function withKey(path) {
   var k = b2aKey();
@@ -64,14 +79,24 @@ function withKey(path) {
     kform.addEventListener('submit', function (e) {
       e.preventDefault();
       var v = $('#k').value.trim();
-      try {
-        if (v) localStorage.setItem(KEY_STORE, v);
-        else localStorage.removeItem(KEY_STORE);
-      } catch (err) { /* 隐私模式下写不了，就当这次会话有效 */ }
+      var stored = setKey(v);
       $('#keybox').hidden = !!v;
+      var tip = $('#keytip');
+      if (tip) {
+        tip.textContent = v
+          ? (stored ? '已保存，正在校验…' : '当前浏览器不允许保存（隐私模式），本次访问有效。正在校验…')
+          : '已清除 Key。';
+      }
       refreshRSS();
-      loadStats(); loadWatch(); loadChanges(); loadNotify(); loadProviders();
-      if (input.value.trim()) submit();
+      // 保存完立刻验一次：Key 填错了跟没填一样，而「保存成功」的提示会让人
+      // 以为已经好了，直到下一次刷新才发现还是 401。
+      api('/api/v1/stats').then(function () {
+        if (tip) tip.textContent = v ? '✓ Key 有效，已保存到本浏览器。' : '已清除 Key。';
+        loadStats(); loadWatch(); loadChanges(); loadNotify(); loadProviders();
+        if (input.value.trim()) submit();
+      }).catch(function (err) {
+        if (tip) tip.textContent = '✗ Key 无效：' + err.message;
+      });
     });
   }
 
@@ -312,50 +337,6 @@ function withKey(path) {
      屏幕上那十几行。默认先要 20 条，点「展开」再多要一页，
      展开后的条数记在 wWant 里，轮询时按同样的条数刷新，
      否则每次轮询都会把用户刚展开的列表收回去。 */
-  var wWant = 20, wShowAll = false;
-
-  function watchRow(it, box) {
-    var row = el('div', 'row');
-    var dom = el('div', 'dom');
-    var btn = el('button', null, it.domain);
-    btn.type = 'button';
-    btn.onclick = function () { input.value = it.domain; submit(); };
-    dom.appendChild(btn);
-    row.appendChild(dom);
-
-    var sub = el('div', 'sub', (it.changes ? it.changes + ' 次变更' : '暂无变更') + ' · 检查于 ' + when(it.checked_at));
-    row.appendChild(sub);
-    if (it.last_error) {
-      // 连续失败次数要写出来：显示「上游异常」但不告诉你挂了几轮，
-      // 就没法判断是一次抖动还是已经挂了一整天。
-      var b = el('span', 'badge err', it.fail_streak > 1 ? '连续 ' + it.fail_streak + ' 轮失败' : '上游异常');
-      b.title = it.last_error;
-      row.appendChild(b);
-    } else if (it.last_icp) {
-      row.appendChild(el('span', 'badge', it.last_icp));
-    } else if (it.last_fp) {
-      var nb = el('span', 'badge warn', '无备案');
-      nb.title = '上一次巡检时未查到备案记录';
-      row.appendChild(nb);
-    }
-
-    var grow = el('div', 'grow');
-    var del = el('button', 'drop', '移出');
-    del.type = 'button';
-    del.onclick = function () {
-      api('/api/v1/watch?domain=' + encodeURIComponent(it.domain), { method: 'DELETE' })
-        .then(loadWatch)
-        .catch(function (e) { del.textContent = '失败'; del.title = e.message; });
-    };
-    grow.appendChild(del);
-    row.appendChild(grow);
-    box.appendChild(row);
-  }
-
-  /* 监控列表分页：首页每 60 秒轮询一次，域名上千时接口全量返回是纯浪费——
-     屏幕上就那十几行。服务端默认给 20 条 + 总数，点「展开」再多要 50 条。
-     用 offset 逐页取，是因为服务端单页上限 200：一千个域名时要翻五页，
-     光靠调大 limit 到不了。 */
   var wWant = 20, wShowAll = false;
 
   function watchRow(it, box) {
