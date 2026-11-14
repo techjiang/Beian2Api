@@ -86,6 +86,16 @@ type Store struct {
 	// 合起来却能让数据文件无限长——按域名算的配额对「只查一次」的域名完全无效。
 	retainHistoryTotal int
 
+	// histCount 是历史快照 bucket 的条目数缓存，histSeeded 表示它是否可信。
+	//
+	// 为什么不每次都读 b.Stats().KeyN：它是 O(全部键) 的遍历。实测 2 万条 47µs、
+	// 20 万条 713µs，而这是 **写入路径**——每写一条历史快照就要付一次。
+	// 保留上限本来只是「该不该裁」的一个判断，用不着精确到个位数：
+	// 增量维护 + 真正裁剪时重算一次（顺带纠正漂移），既准又便宜。
+	histMu     sync.Mutex
+	histCount  int64
+	histSeeded bool
+
 	// lastPurge 是上次清理过期缓存的时间戳（Unix 秒）。
 	// 清理是 O(缓存条目数) 的全表遍历，跟着 15 秒的维护节奏跑，
 	// 十万条缓存就是每 15 秒扫十万条。真正该有的是「定期」而不是「频繁」。
@@ -237,13 +247,21 @@ func (s *Store) AppendHistory(r model.Record) error {
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bk := tx.Bucket(bucketHistory)
+		// 覆盖写（同一时刻、同一指纹）不算新增，计数不能跟着涨。
+		existed := bk.Get(key) != nil
 		if err := bk.Put(key, b); err != nil {
 			return err
 		}
-		if err := trimHistoryDomain(bk, r.Domain, s.retainHistory); err != nil {
+		delta := int64(0)
+		if !existed {
+			delta = 1
+		}
+		removed, err := trimHistoryDomain(bk, r.Domain, s.retainHistory)
+		if err != nil {
 			return err
 		}
-		return trimHistoryTotal(bk, s.retainHistoryTotal)
+		delta -= int64(removed)
+		return s.trimHistoryTotal(bk, delta)
 	})
 }
 
@@ -251,9 +269,10 @@ func (s *Store) AppendHistory(r model.Record) error {
 //
 // 用 cursor 从该域名的 key 前缀走一遍，只碰自己的那一段，
 // 不扫全表——这是它和 TrimHistory 的区别，也是它能放进写入路径的原因。
-func trimHistoryDomain(b *bolt.Bucket, domain string, keep int) error {
+// 返回值是实际删掉的条数，调用方要拿它维护历史总条数缓存。
+func trimHistoryDomain(b *bolt.Bucket, domain string, keep int) (int, error) {
 	if keep <= 0 {
-		return nil
+		return 0, nil
 	}
 	prefix := []byte(domain + "\x00")
 	var keys [][]byte
@@ -262,14 +281,15 @@ func trimHistoryDomain(b *bolt.Bucket, domain string, keep int) error {
 		keys = append(keys, append([]byte(nil), k...))
 	}
 	if len(keys) <= keep {
-		return nil
+		return 0, nil
 	}
-	for _, k := range keys[:len(keys)-keep] {
+	doomed := keys[:len(keys)-keep]
+	for _, k := range doomed {
 		if err := b.Delete(k); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(doomed), nil
 }
 
 // trimHistoryTotal 把整个历史 bucket 裁到 keep 条以内，从最旧的删。
@@ -280,18 +300,33 @@ func trimHistoryDomain(b *bolt.Bucket, domain string, keep int) error {
 // 所以不能每次写入都跑：上限 2 万条时，每写一条扫 2 万条，就变成前面
 // 刚挪走的那个「定时全表扫描」换了个位置。这里留一段余量（10%），
 // 攒够了再裁一次并裁回上限，摊下来是「每 2000 次写入扫一趟全表」。
-func trimHistoryTotal(b *bolt.Bucket, keep int) error {
+func (s *Store) trimHistoryTotal(b *bolt.Bucket, delta int64) error {
+	keep := s.retainHistoryTotal
 	if keep <= 0 {
 		return nil
 	}
-	total := b.Stats().KeyN
 	slack := keep / 10
 	if slack < 10 {
 		slack = 10
 	}
-	if total <= keep+slack {
+	s.histMu.Lock()
+	if !s.histSeeded {
+		// 第一次用：以真实桶大小为准（升级上来的老数据可能早就超限）。
+		s.histCount = int64(b.Stats().KeyN)
+		s.histSeeded = true
+	}
+	s.histCount += delta
+	total := s.histCount
+	s.histMu.Unlock()
+	if total <= int64(keep+slack) {
 		return nil
 	}
+	// 到这儿才做全表扫描。扫完顺便把计数校正成真实值：增量维护允许漂移，
+	// 而这一步每 (keep/10) 次写入才跑一次，校正的成本被摊平了。
+	total = int64(b.Stats().KeyN)
+	s.histMu.Lock()
+	s.histCount = total
+	s.histMu.Unlock()
 	type item struct {
 		key []byte
 		ts  int64
@@ -319,7 +354,21 @@ func trimHistoryTotal(b *bolt.Bucket, keep int) error {
 			return err
 		}
 	}
+	s.histMu.Lock()
+	s.histCount = int64(keep)
+	s.histMu.Unlock()
 	return nil
+}
+
+// invalidateHistoryCount 让历史条数缓存在下一次写入时重新取准。
+//
+// 批量改动（TrimHistory / Restore / 清空）之后必须调它：增量维护的计数
+// 只认得「经由 AppendHistory 的单条增删」，绕开它一次性删掉几千条时
+// 缓存还停在旧值上，裁剪节奏就会一直错下去。
+func (s *Store) invalidateHistoryCount() {
+	s.histMu.Lock()
+	s.histSeeded = false
+	s.histMu.Unlock()
 }
 
 // History 返回某域名的历史快照，按时间升序。
@@ -825,6 +874,9 @@ func (s *Store) TrimHistory(keep int) (int, error) {
 		removed = len(stale)
 		return nil
 	})
+	if err == nil {
+		s.invalidateHistoryCount()
+	}
 	return removed, err
 }
 
@@ -1141,6 +1193,7 @@ func (s *Store) Restore(d *Dump) error {
 	if err != nil {
 		return err
 	}
+	s.invalidateHistoryCount()
 	// 计数器在内存里有副本，导入后必须重新加载，否则会拿旧值继续累加。
 	s.cmu.Lock()
 	s.base = map[string]int64{}

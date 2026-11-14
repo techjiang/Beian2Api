@@ -66,27 +66,37 @@ func New(o Options) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// 业务接口
-	mux.HandleFunc("/api/v1/query", s.withRateLimit(s.withAuth(s.handleQuery)))
-	mux.HandleFunc("/api/v1/batch", s.withRateLimit(s.withAuth(s.handleBatch)))
-	mux.HandleFunc("/api/v1/history", s.withRateLimit(s.withAuth(s.handleHistory)))
-	mux.HandleFunc("/api/v1/diff", s.withRateLimit(s.withAuth(s.handleDiff)))
-	mux.HandleFunc("/api/v1/watch", s.withRateLimit(s.withAuth(s.handleWatch)))
-	mux.HandleFunc("/api/v1/watch/run", s.withRateLimit(s.withAuth(s.handleWatchRun)))
-	mux.HandleFunc("/api/v1/watch/list", s.withRateLimit(s.withAuth(s.handleWatchList)))
-	mux.HandleFunc("/api/v1/watch/status", s.withRateLimit(s.withAuth(s.handleWatchStatus)))
-	mux.HandleFunc("/api/v1/stats", s.withRateLimit(s.withAuth(s.handleStats)))
-	mux.HandleFunc("/api/v1/providers", s.withRateLimit(s.withAuth(s.handleProviders)))
-	mux.HandleFunc("/api/v1/changes", s.withRateLimit(s.withAuth(s.handleChanges)))
+	// 业务接口。只读接口显式声明只接受 GET/HEAD：
+	// 之前没有任何方法检查，`DELETE /api/v1/stats` 会返回 200 和完整统计，
+	// 客户端会以为自己真的删掉了什么。allowMethods 把这件事变成 405 + Allow 头。
+	read := func(h http.HandlerFunc) http.HandlerFunc {
+		return s.withRateLimit(s.withAuth(allowMethods(h, http.MethodGet)))
+	}
+	readWrite := func(h http.HandlerFunc) http.HandlerFunc {
+		return s.withRateLimit(s.withAuth(allowMethods(h, http.MethodGet, http.MethodPost)))
+	}
+	mux.HandleFunc("/api/v1/query", readWrite(s.handleQuery))
+	mux.HandleFunc("/api/v1/batch", readWrite(s.handleBatch))
+	mux.HandleFunc("/api/v1/history", read(s.handleHistory))
+	mux.HandleFunc("/api/v1/diff", read(s.handleDiff))
+	// watch 同时接受 POST（加入）与 DELETE（移出）。
+	mux.HandleFunc("/api/v1/watch", s.withRateLimit(s.withAuth(allowMethods(s.handleWatch, http.MethodPost, http.MethodDelete))))
+	mux.HandleFunc("/api/v1/watch/run", s.withRateLimit(s.withAuth(allowMethods(s.handleWatchRun, http.MethodPost))))
+	mux.HandleFunc("/api/v1/watch/list", read(s.handleWatchList))
+	mux.HandleFunc("/api/v1/watch/status", read(s.handleWatchStatus))
+	mux.HandleFunc("/api/v1/stats", read(s.handleStats))
+	mux.HandleFunc("/api/v1/providers", read(s.handleProviders))
+	mux.HandleFunc("/api/v1/changes", read(s.handleChanges))
 	// RSS 也要过鉴权：它列的是「你在监控哪些域名」，这本身就是一份情报。
 	// 之前这里没包 withAuth，开了 API Key 的部署，变更流水照样对全网公开。
 	// RSS 阅读器不方便带请求头，但 withAuth 认 ?key=，订阅地址里带上即可。
-	mux.HandleFunc("/api/v1/changes.rss", s.withRateLimit(s.withAuth(s.handleRSS)))
-	mux.HandleFunc("/api/v1/notify/status", s.withRateLimit(s.withAuth(s.handleNotifyStatus)))
-	mux.HandleFunc("/api/v1/notify/test", s.withRateLimit(s.withAuth(s.handleNotifyTest)))
-	mux.HandleFunc("/api/v1/verify", s.withRateLimit(s.withAuth(s.handleVerify)))
-	mux.HandleFunc("/api/v1/admin/backup", s.withRateLimit(s.withAuth(s.handleAdminBackup)))
-	mux.HandleFunc("/api/v1/openapi.json", s.handleOpenAPI)
+	mux.HandleFunc("/api/v1/changes.rss", read(s.handleRSS))
+	mux.HandleFunc("/api/v1/notify/status", read(s.handleNotifyStatus))
+	mux.HandleFunc("/api/v1/notify/test", s.withRateLimit(s.withAuth(allowMethods(s.handleNotifyTest, http.MethodPost))))
+	mux.HandleFunc("/api/v1/verify", read(s.handleVerify))
+	mux.HandleFunc("/api/v1/admin/backup", s.withRateLimit(s.withAuth(
+		allowMethods(s.handleAdminBackup, http.MethodGet, http.MethodPost))))
+	mux.HandleFunc("/api/v1/openapi.json", allowMethods(s.handleOpenAPI, http.MethodGet))
 
 	// 徽章与运维。
 	//
@@ -94,10 +104,10 @@ func (s *Server) Handler() http.Handler {
 	// 它不能裸奔：每个请求都可能触发一次回源，等于给全网开了一个
 	// 「填任意域名就能让服务器去查一次上游」的放大器，而它又不占鉴权、
 	// 不限流——之前实测连刷 120 次全部 200，同时 /api/v1/query 已经 429。
-	mux.HandleFunc("/badge/icp.svg", s.withRateLimit(s.handleBadge))
-	mux.HandleFunc("/badge/icp", s.withRateLimit(s.handleBadge))
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/badge/icp.svg", s.withRateLimit(allowMethods(s.handleBadge, http.MethodGet)))
+	mux.HandleFunc("/badge/icp", s.withRateLimit(allowMethods(s.handleBadge, http.MethodGet)))
+	mux.HandleFunc("/healthz", allowMethods(s.handleHealth, http.MethodGet))
+	mux.HandleFunc("/readyz", allowMethods(s.handleReady, http.MethodGet))
 
 	// 静态站点
 	s.mountStatic(mux)

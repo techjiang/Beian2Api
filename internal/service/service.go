@@ -45,8 +45,14 @@ type call struct {
 }
 
 // Query 查询一个域名的备案信息。
+//
+// 域名在这里被归一化**并**消掉 www. 前缀（model.CanonicalDomain）。
+// 备案是按主域名登记的，`www.example.com` 与 `example.com` 是同一份备案；
+// 而缓存、历史、监控三处都以域名字符串做 key，不去重的话同一个备案会有
+// 两份缓存、两行监控，改一次推两条重复通知，移出一条另一条还在报警。
+// 文档早就承诺「两者共用同一份缓存、同一行监控」，这里让它成立。
 func (s *Service) Query(ctx context.Context, rawDomain string, opts Options) (*model.Result, error) {
-	domain := model.NormalizeDomain(rawDomain)
+	domain := model.CanonicalDomain(rawDomain)
 	if !model.IsValidDomain(domain) {
 		return nil, ErrInvalidDomain
 	}
@@ -233,7 +239,7 @@ func (s *Service) Batch(ctx context.Context, domains []string, opts Options, con
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			r, err := s.Query(ctx, d, opts)
-			item := BatchItem{Domain: model.NormalizeDomain(d)}
+			item := BatchItem{Domain: model.CanonicalDomain(d)}
 			if err != nil {
 				item.Error = err.Error()
 			} else {
@@ -248,7 +254,7 @@ func (s *Service) Batch(ctx context.Context, domains []string, opts Options, con
 
 // History 返回某域名的历史快照。
 func (s *Service) History(domain string, limit int) ([]model.Record, error) {
-	d := model.NormalizeDomain(domain)
+	d := model.CanonicalDomain(domain)
 	if !model.IsValidDomain(d) {
 		return nil, ErrInvalidDomain
 	}

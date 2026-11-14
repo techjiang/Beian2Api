@@ -170,6 +170,24 @@ func trimWWW(d string) string {
 	return rest
 }
 
+// CanonicalDomain 返回「同一个网站」的统一写法：归一化后去掉前导 www.。
+//
+// 为什么需要一个统一的 key：备案是按主域名登记的，`www.example.com` 和
+// `example.com` 是同一份备案。但缓存、历史、监控三处都以域名字符串做 key，
+// 于是查一次 www 版本就多出一条缓存、加一次监控就多出一行——同一个备案
+// 被监控两遍，改一次会推两条重复通知，任何一条移出后另一条还在报。
+// 文档里写着「两者共用同一份缓存、同一行监控」，实现必须对得上。
+//
+// 注意这不是「猜主域名」：只剥 www.，不动 api. / m. 这类真正的子域名——
+// 它们可能是独立备案的站点，贸然合并会把不同网站的数据混在一起。
+func CanonicalDomain(raw string) string {
+	d := NormalizeDomain(raw)
+	if d == "" {
+		return ""
+	}
+	return trimWWW(d)
+}
+
 // IsValidDomain 做语法校验。
 func IsValidDomain(d string) bool {
 	if len(d) < 4 || len(d) > 253 {

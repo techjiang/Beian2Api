@@ -76,7 +76,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	clean := make([]string, 0, len(domains))
 	seen := map[string]struct{}{}
 	for _, d := range domains {
-		n := model.NormalizeDomain(d)
+		n := model.CanonicalDomain(d)
 		if n == "" {
 			continue
 		}
@@ -128,7 +128,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		out = append(out, n)
 	}
 	writeOK(w, map[string]any{
-		"domain":  model.NormalizeDomain(domain),
+		"domain":  model.CanonicalDomain(domain),
 		"total":   len(out),
 		"history": out,
 	})
@@ -144,7 +144,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(recs) < 2 {
 		writeOK(w, map[string]any{
-			"domain":  model.NormalizeDomain(domain),
+			"domain":  model.CanonicalDomain(domain),
 			"changed": false,
 			"message": "历史快照不足两条，暂无可对比的变化",
 		})
@@ -153,7 +153,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	a := recs[len(recs)-2]
 	b := recs[len(recs)-1]
 	writeOK(w, map[string]any{
-		"domain":   model.NormalizeDomain(domain),
+		"domain":   model.CanonicalDomain(domain),
 		"changed":  len(service.DiffRecords(&a, &b)) > 0,
 		"previous": a,
 		"current":  b,
@@ -172,7 +172,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
-		d := model.NormalizeDomain(body.Domain)
+		d := model.CanonicalDomain(body.Domain)
 		if !model.IsValidDomain(d) {
 			writeErr(w, http.StatusBadRequest, "invalid_domain", "域名格式不正确")
 			return
@@ -208,7 +208,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		}
 		writeOK(w, map[string]any{"domain": d, "watching": true, "baseline_icp": item.LastICP})
 	case http.MethodDelete:
-		d := model.NormalizeDomain(r.URL.Query().Get("domain"))
+		d := model.CanonicalDomain(r.URL.Query().Get("domain"))
 		if d == "" {
 			writeErr(w, http.StatusBadRequest, "missing_domain", "缺少 domain 参数")
 			return

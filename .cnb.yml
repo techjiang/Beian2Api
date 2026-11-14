@@ -52,6 +52,14 @@ $:
         image: golang:1.23
       env:
         GOPROXY: https://goproxy.cn,direct
+        # PR 阶段就要跑 -race。
+        #
+        # 之前 PR 只跑 `go test ./...`，而 main 分支上跑的是 `go test -race`——
+        # 于是「测试里有数据竞争」这类问题在 PR 阶段永远是绿的，合并到 main
+        # 才炸。实际情况正是这样：notify 与 api 两个包的测试各自裸写共享变量，
+        # main 的 check 阶段长期是红的，而每个 PR 都显示通过。
+        # 门禁要拦在合并前，不是合并后。
+        CGO_ENABLED: "1"
       stages:
         - name: gofmt
           script: |
@@ -63,7 +71,7 @@ $:
         - name: vet
           script: go vet ./...
         - name: test
-          script: go test ./... -count=1
+          script: go test -race ./... -count=1
 
   # 打 Tag 时构建镜像推送到本仓库的 Docker 制品库，并发布 Release
   tag_push:

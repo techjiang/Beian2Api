@@ -132,11 +132,14 @@ func (s *Server) handleRSS(w http.ResponseWriter, r *http.Request) {
 	// lastBuildDate 用最后一条事件的时间，不是 time.Now()。
 	// 每次请求都把「构建时间」刷新成当前时刻，等于告诉阅读器「内容刚变过」，
 	// 于是一个永远不会变的 feed 也会被反复拉取。
-	built := time.Now()
+	//
+	// 空 feed 同理，但上一版只修了「有事件」那一支：没有事件时仍然回落到
+	// time.Now()，于是「一条记录都没有」的这个 feed 反而每次请求都在变——
+	// 比修之前更容易被反复拉。空 feed 干脆不输出 lastBuildDate：
+	// RFC 822 里它是可选项，缺失的正确含义就是「没有内容更新过」。
 	if len(items) > 0 {
-		built = time.Unix(items[0].At, 0)
+		fmt.Fprintf(&b, "<lastBuildDate>%s</lastBuildDate>\n", time.Unix(items[0].At, 0).Format(time.RFC1123Z))
 	}
-	fmt.Fprintf(&b, "<lastBuildDate>%s</lastBuildDate>\n", built.Format(time.RFC1123Z))
 	for _, c := range items {
 		fmt.Fprintf(&b, "<item><title>%s 备案%s</title>\n", esc(c.Domain), esc(kindWord(c.Kind)))
 		fmt.Fprintf(&b, "<link>%s/api/v1/history?domain=%s</link>\n", esc(base), esc(c.Domain))

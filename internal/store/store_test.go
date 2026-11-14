@@ -729,3 +729,66 @@ func TestUpdateWatchIfExists(t *testing.T) {
 		t.Fatalf("写入未生效: %+v", it)
 	}
 }
+
+// 写历史不该每次都做一次 O(全部键) 的统计。
+//
+// trimHistoryTotal 原来每写一条快照都调 b.Stats().KeyN——它是遍历整个 bucket
+// 数键。实测 2 万条 47µs、20 万条 713µs，而这是**写入路径**：每一次备案变更
+// 都要为「该不该裁」这个判断付一遍全表统计的钱。
+//
+// 现在改成增量维护 + 到点重算。这条用例盯的是语义仍然正确：
+// 上限照旧生效，超了照旧从最旧的删。
+func TestAppendHistoryEnforcesTotalLimit(t *testing.T) {
+	s := open(t)
+	s.WithRetention(0, 1000).WithHistoryTotal(30)
+	base := model.Now()
+	for i := 0; i < 120; i++ {
+		r := model.Record{
+			Domain:    "example.com",
+			UnitName:  "公司",
+			ICPCode:   "京ICP备" + strconv.Itoa(100000+i) + "号-1",
+			FetchedAt: base - int64(120-i)*3600,
+		}
+		if err := s.AppendHistory(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := s.Count()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 留了 10% 的余量（上限 30 → 攒到 40 才裁、裁回 30），所以是 30..40 之间。
+	if c.History < 30 || c.History > 40 {
+		t.Fatalf("历史总数应被压在 30 上下（含 10%% 余量），实际 %d", c.History)
+	}
+	// 留下来的必须是最新的那批。
+	hist, err := s.History("example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) == 0 {
+		t.Fatal("历史不该被裁空")
+	}
+	if last := hist[len(hist)-1].ICPCode; last != "京ICP备100119号-1" {
+		t.Fatalf("最新一条应保留，实际最后一条是 %q", last)
+	}
+}
+
+// 覆盖写不该被算成新增，否则计数会一路飘，提前触发全表裁剪。
+func TestAppendHistorySameKeyDoesNotInflateCount(t *testing.T) {
+	s := open(t)
+	s.WithRetention(0, 1000).WithHistoryTotal(10)
+	r := model.Record{Domain: "example.com", UnitName: "公司", ICPCode: "京ICP备1号-1", FetchedAt: model.Now()}
+	for i := 0; i < 50; i++ {
+		if err := s.AppendHistory(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hist, err := s.History("example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 1 {
+		t.Fatalf("同一时刻同一内容重复写入应互相覆盖，实际 %d 条", len(hist))
+	}
+}

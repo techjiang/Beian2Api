@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -371,9 +372,12 @@ func TestNotifyStatusWithoutChannels(t *testing.T) {
 }
 
 func TestNotifyTestDelivers(t *testing.T) {
-	var n int
+	// 计数要在多个连接 goroutine 之间累加：Send 对每个通道起一个 goroutine，
+	// httptest 的 handler 也各在自己的 goroutine 里。裸 n++ 是数据竞争，
+	// `go test -race` 会直接把这条用例判红——问题在测试，不在产品代码。
+	var n int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n++
+		atomic.AddInt64(&n, 1)
 		_, _ = w.Write([]byte(`{"errcode":0,"code":0}`))
 	}))
 	defer srv.Close()
@@ -396,8 +400,8 @@ func TestNotifyTestDelivers(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"ok":2`) {
 		t.Fatalf("两个通道都应成功: %s", w.Body.String())
 	}
-	if n != 2 {
-		t.Fatalf("应发出 2 条请求，实际 %d", n)
+	if got := atomic.LoadInt64(&n); got != 2 {
+		t.Fatalf("应发出 2 条请求，实际 %d", got)
 	}
 
 	// 发完之后状态接口要能反映成功

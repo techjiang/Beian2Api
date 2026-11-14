@@ -264,3 +264,76 @@ func TestFrontendVerifySendsDomain(t *testing.T) {
 		t.Fatal("域名是可选项，输入框不能 required")
 	}
 }
+
+// 变更流水的翻页不能撞上服务端 limit 上限。
+//
+// /api/v1/changes 的 limit 上限是 200，超了如实返回 400（这是对的：静默改小
+// 会让调用方以为后面没数据了）。但前端原来是 `cWant += 50` 无条件往上堆：
+// 点四次「加载更早的」就是 limit=210 → 400 → 整个变更列表被换成一个错误框，
+// 而下方明明还有一大截流水翻不到。
+//
+// 这条测试盯的是「前端请求里的 limit 必须被夹在上限内，且超过上限的部分
+// 改用 offset 往后翻」。两个数字一旦有一边改了，这里会立刻失败。
+func TestFrontendChangesPagerRespectsLimitCap(t *testing.T) {
+	src := string(mustAsset(t, "app.js"))
+	// 这里要剥注释、**保留字符串字面量**：URL 拼接本身就在字符串里。
+	code := stripLineComments(src)
+	if !strings.Contains(code, "CHG_MAX = 200") {
+		t.Fatal("前端要有一个和服务端上限一致的名字（CHG_MAX），别让魔法数字散在代码里")
+	}
+	// limit 必须是局部变量算出来的，不能由「已加载条数」直接拼进 URL。
+	// 原来就是 `'...?limit=' + cWant`，cWant 一路加到 210 → 400。
+	if regexp.MustCompile(`/api/v1/changes\?limit=' \+ (cWant|cItems\.length)`).MatchString(code) {
+		t.Fatal("limit 不能直接拼累积计数，那样翻页会撞上服务端上限")
+	}
+	// 每页固定一页的量，翻页靠 offset。
+	if !strings.Contains(code, "'&offset=' + offset") {
+		t.Fatal("往后翻页要用 offset，不能靠把 limit 越堆越大")
+	}
+	// limit 必须被夹在 CHG_MAX 以内（刷新时按已加载条数重取，可能超上限）。
+	if !strings.Contains(code, "Math.min(cItems.length, CHG_MAX)") {
+		t.Fatal("刷新时的 limit 必须夹在 CHG_MAX 以内")
+	}
+	// 首屏不能一次拉满：一上来铺 200 行会把后面的面板推得很远。
+	if !strings.Contains(code, "CHG_FIRST = 10") {
+		t.Fatal("首屏应只加载第一小段（CHG_FIRST）")
+	}
+}
+
+// 用 offset 翻页时，已加载的内容不能被新一页顶掉。
+//
+// 「加载更早的」按 offset 取下一页，如果渲染时直接 `cList.innerHTML=”` 再
+// 只画这一页，用户点一下反而看到更少的记录——比不翻更让人困惑。
+// 累积列表由 cItems 持有，mergeChanges 负责去重合并。
+func TestFrontendChangesAppendsNotReplaces(t *testing.T) {
+	src := string(mustAsset(t, "app.js"))
+	code := stripLineComments(src)
+	if !strings.Contains(code, "function mergeChanges(") {
+		t.Fatal("要有 mergeChanges 负责把新一页并进已加载列表")
+	}
+	if !strings.Contains(code, "cItems = mergeChanges(") {
+		t.Fatal("翻页必须合并而不是覆盖")
+	}
+	if !strings.Contains(code, "function chgKey(") {
+		t.Fatal("合并要按事件身份去重，否则轮询重取第一页会出现重复行")
+	}
+}
+
+// 类型筛选换了之后必须清掉累积的旧记录。
+//
+// 否则「只看注销」的列表里会残留着上一种筛选拉回来的变更——
+// 标题写着「注销 · N 条」，点进去混着变更事件。
+func TestFrontendChangesResetsOnFilter(t *testing.T) {
+	src := string(mustAsset(t, "app.js"))
+	i := strings.Index(src, "cKindSel.onchange")
+	if i < 0 {
+		t.Fatal("找不到类型筛选的处理")
+	}
+	body := src[i:]
+	if j := strings.Index(body, "};"); j > 0 {
+		body = body[:j]
+	}
+	if !strings.Contains(body, "cItems = []") {
+		t.Fatal("换筛选条件时要清空累积列表")
+	}
+}

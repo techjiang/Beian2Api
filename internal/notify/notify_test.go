@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,18 +24,44 @@ func sampleEvent() Event {
 	}
 }
 
-func capture(t *testing.T) (*httptest.Server, *[]map[string]any) {
+// capture 起一个假 Webhook 服务，记录收到的载荷。
+//
+// 必须加锁：Send 是并发投递（每个通道一个 goroutine），而 httptest 的
+// handler 也跑在各自的 goroutine 里。裸 append 在 `go test -race` 下
+// 就是一条 data race——CI 的 race 阶段因此长期是红的，看起来像产品代码有问题，
+// 实际是测试自己没同步。读的时候走 snapshot()，别直接解引用。
+func capture(t *testing.T) (*httptest.Server, *captureSink) {
 	t.Helper()
-	var got []map[string]any
+	sink := &captureSink{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var m map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&m)
-		got = append(got, m)
+		sink.add(m)
 		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &got
+	return srv, sink
 }
+
+// captureSink 是并发安全的载荷收集器。
+type captureSink struct {
+	mu   sync.Mutex
+	msgs []map[string]any
+}
+
+func (c *captureSink) add(m map[string]any) {
+	c.mu.Lock()
+	c.msgs = append(c.msgs, m)
+	c.mu.Unlock()
+}
+
+func (c *captureSink) snapshot() []map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]map[string]any(nil), c.msgs...)
+}
+
+func (c *captureSink) len() int { return len(c.snapshot()) }
 
 func TestKindInference(t *testing.T) {
 	cases := []struct{ kind, url, want string }{
@@ -88,8 +115,8 @@ func TestDeliveredToMatchingKinds(t *testing.T) {
 	if len(res) != 2 || !res[0].OK || !res[1].OK {
 		t.Fatalf("两个通道都应成功: %+v", res)
 	}
-	if len(*got) != 2 {
-		t.Fatalf("应收到 2 条请求，实际 %d", len(*got))
+	if got.len() != 2 {
+		t.Fatalf("应收到 2 条请求，实际 %d", got.len())
 	}
 	if d.States()["dd"].OK != 1 {
 		t.Fatalf("状态未累加: %+v", d.States())
@@ -144,18 +171,18 @@ func TestEventFilter(t *testing.T) {
 		{Name: "only-revoked", Kind: KindWeCom, URL: srv.URL, Events: []string{EventRevoked}},
 	}, testLogger())
 	d.Send(context.Background(), sampleEvent()) // changed，应被过滤
-	if len(*got) != 0 {
+	if got.len() != 0 {
 		t.Fatal("未订阅的事件不该推送")
 	}
 	ev := sampleEvent()
 	ev.Kind = EventRevoked
 	d.Send(context.Background(), ev)
-	if len(*got) != 1 {
+	if got.len() != 1 {
 		t.Fatal("订阅的事件应推送")
 	}
 	// 测试事件不受订阅限制，方便验证配置
 	d.Send(context.Background(), Event{Kind: EventTest})
-	if len(*got) != 2 {
+	if got.len() != 2 {
 		t.Fatal("测试事件应无视订阅过滤")
 	}
 }

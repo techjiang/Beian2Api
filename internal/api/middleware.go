@@ -142,6 +142,57 @@ func validHop(v string) string {
 	return ""
 }
 
+// allowMethods 限定接口接受的 HTTP 方法，其余一律 405 并给出 Allow 头。
+//
+// 这不是洁癖。之前只读接口（stats / providers / changes / verify / watch/*
+// 等）根本没检查方法——一个 DELETE /api/v1/stats 会返回 200 和一份完整统计。
+// 后果有两层：
+//   - 客户端/网关看到「删成功」会认为自己真的删了，实际上什么都没发生；
+//   - 有些人靠「改一下方法看会不会变」来判断接口性质，这里给出的答案是错的。
+//
+// 接口本身没变，变的是对外承诺：不属于它的方法就该明确拒绝。
+//
+// HEAD 跟着 GET 一起放行：不少监控探针和 CDN 预热只用 HEAD，
+// 而 Go 的 net/http 对 HEAD 会自动丢掉响应体，handler 什么都不用改。
+// 之前 /api/v1/query 收到 HEAD 直接 405，`curl -I` 探活永远是红叉。
+func allowMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
+	allow := make(map[string]struct{}, len(methods)+1)
+	list := make([]string, 0, len(methods)+1)
+	for _, m := range methods {
+		m = strings.ToUpper(m)
+		if _, ok := allow[m]; ok {
+			continue
+		}
+		allow[m] = struct{}{}
+		list = append(list, m)
+		if m == http.MethodGet {
+			allow[http.MethodHead] = struct{}{}
+			list = append(list, http.MethodHead)
+		}
+	}
+	header := strings.Join(list, ", ")
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := allow[r.Method]; ok {
+			// HEAD 以 GET 的身份进入业务处理函数。
+			//
+			// 各 handler 内部还各自判断「仅支持 GET / POST」，直接把 HEAD 放进去
+			// 会被它们再拦一次 405——那等于没放行。复制一份请求、把方法改成 GET
+			// 是最省事的一致做法：net/http 对真实连接上的 HEAD 会自动丢掉响应体，
+			// 而 handler 里「算完再写」的逻辑照常跑一遍，这正是 HEAD 的语义。
+			if r.Method == http.MethodHead {
+				hr := r.Clone(r.Context())
+				hr.Method = http.MethodGet
+				next(w, hr)
+				return
+			}
+			next(w, r)
+			return
+		}
+		w.Header().Set("Allow", header)
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 "+header)
+	}
+}
+
 // withRateLimit 包装限流。
 func (s *Server) withRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	if s.limiter == nil {

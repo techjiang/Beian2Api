@@ -547,76 +547,135 @@ function withKey(path) {
   }
 
   /* 变更流水的翻页与筛选状态。
-     cWant 是当前要拉多少条（点「加载更多」就加一页），cKind 是类型筛选。
-     轮询刷新时按同样的参数重拉，否则一次 60 秒的自动刷新就把用户
-     刚展开的内容和刚选的筛选一起收回去。 */
-  var cWant = 10, cKind = '';
+
+     cItems 是已经加载到手的流水（累积），cKind 是类型筛选。
+     轮询刷新时按同样的条数重拉，否则一次 60 秒的自动刷新就把用户
+     刚展开的内容和刚选的筛选一起收回去。
+
+     两件必须同时成立的事：
+     1. **首屏不能一次拉满**。这个面板在页面中段，底下还有推送通道；
+        一上来就铺 200 行，等于把后面的内容推到很远，滚动条长得离谱。
+     2. **翻页不能撞服务端上限**。/api/v1/changes 的 limit 上限是 200，
+        超了如实返回 400（静默改小会让调用方以为后面没数据了）。
+        原来这里是 `cWant += 50` 无条件往上堆：点四次就是 limit=210 →
+        400 → 整个列表被换成一个错误框，而底下明明还有几百条翻不到。
+
+     所以：每页固定 CHG_PAGE 条，往后翻用 offset，翻到多少条都不会让
+     limit 变大。CHG_MAX 只是「别自己越过服务端上限」的守门人。 */
+  var CHG_FIRST = 10;
+  var CHG_PAGE = 50;
+  var CHG_MAX = 200;
+  var cItems = [], cKind = '', cHasMore = false, cLoading = false;
 
   var chgWord = {
     changed: '变更', revoked: '注销', registered: '新增',
     upstream_error: '上游异常', recovered: '已恢复'
   };
 
-  function loadChanges() {
-    if (!cList) return;
-    var q = '/api/v1/changes?limit=' + cWant;
+  /* 同一条事件的身份：域 + 时间 + 类型。
+     at 是秒级时间戳，同一秒里同一域名理论上只会有一条事件；
+     加 kind 是为了让「上游异常」和「已恢复」同时刻出现时不被去重掉。 */
+  function chgKey(c) { return c.domain + '|' + c.at + '|' + c.kind; }
+
+  /* mergeChanges 把两批记录合成一批：新的在前，重复的按 key 剔掉。
+     翻页时用（新一页接在已加载的后面），轮询刷新时也用——
+     既让刚发生的变更浮现出来，又不把用户已经展开的旧记录抹掉。 */
+  function mergeChanges(fresh, older, prepend) {
+    var seen = {}, out = [];
+    var add = function (list) {
+      list.forEach(function (c) {
+        var k = chgKey(c);
+        if (seen[k]) return;
+        seen[k] = 1;
+        out.push(c);
+      });
+    };
+    if (prepend) { add(fresh); add(older); } else { add(older); add(fresh); }
+    return out;
+  }
+
+  /* loadChanges(extend)：extend 为真时往后翻一页，否则重取开头那一段。 */
+  function loadChanges(extend) {
+    if (!cList || cLoading) return;
+    cLoading = true;
+    var offset = extend ? cItems.length : 0;
+    // 刷新时按「已加载多少条」重取，让视图保持在同一个位置；
+    // 超过上限就只刷新前 CHG_MAX 条，剩下的靠 merge 原样留住。
+    var limit = extend ? CHG_PAGE
+      : (cItems.length > CHG_FIRST ? Math.min(cItems.length, CHG_MAX) : CHG_FIRST);
+    var q = '/api/v1/changes?limit=' + limit;
+    if (offset > 0) q += '&offset=' + offset;
     if (cKind) q += '&kind=' + encodeURIComponent(cKind);
     api(q).then(function (d) {
-      // 标题要如实反映「看到的是哪一段」：筛了类型还说「最近 10 条」，
-      // 用户会以为这类事件一共就这么多。
-      var seg = cKind ? (chgWord[cKind] || cKind) + ' · ' : '';
-      $('#c-total').textContent = seg + (d.total ? d.total + ' 条' : '0 条');
-      cList.innerHTML = '';
-      if (!d.items || !d.items.length) {
-        cList.appendChild(el('div', 'hint small-hint', cKind
-          ? '这段时间里没有「' + (chgWord[cKind] || cKind) + '」类事件。换个类型看看，或者等下一次巡检。'
-          : '暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。'));
-        return;
+      var page = d.items || [];
+      if (extend) {
+        cItems = mergeChanges(page, cItems, false);
+      } else if (offset === 0 && limit < cItems.length) {
+        // 只刷新了最前面一段：后面的旧记录原样保留。
+        cItems = mergeChanges(page, cItems, true);
+      } else {
+        cItems = page;
       }
-      d.items.forEach(function (c) {
-        var box = el('div', 'chg');
-        var head = el('div', 'chg-head');
-        var domBtn = el('button', null, c.domain);
-        domBtn.type = 'button';
-        domBtn.style.cssText = 'padding:0;font-size:14px;font-weight:600;color:var(--fg);background:none;border:0;cursor:pointer;font-family:inherit';
-        domBtn.onclick = function () { input.value = c.domain; submit(); };
-        head.appendChild(domBtn);
-        if (c.kind === 'revoked') head.appendChild(el('span', 'badge err', '注销'));
-        else if (c.kind === 'registered') head.appendChild(el('span', 'badge', '新增'));
-        else if (c.kind === 'upstream_error') head.appendChild(el('span', 'badge err', '上游异常'));
-        else if (c.kind === 'recovered') head.appendChild(el('span', 'badge', '已恢复'));
-        if (c.icp_code) head.appendChild(el('span', 'badge', c.icp_code));
-        head.appendChild(el('span', 'when', when(c.at)));
-        box.appendChild(head);
-
-        var diff = el('div', 'chg-diff');
-        if (c.diff && c.diff.length) {
-          diff.appendChild(document.createTextNode(c.diff.map(function (x) {
-            return x.field + '：' + (x.from || '无') + ' → ' + (x.to || '无');
-          }).join('；')));
-        } else {
-          diff.appendChild(document.createTextNode('备案信息发生变化'));
-        }
-        box.appendChild(diff);
-        cList.appendChild(box);
-      });
-      if (d.has_more) {
-        // 「还有更多」必须写出来：只说「加载更多」，用户不知道点下去还有几次；
-        // 而流水本身有保留上限（默认 2000 条），翻到那儿就真的没有了。
-        var more = el('button', 'ghost small more', '加载更早的（每次 ' + (cWant < 10 ? 10 : 50) + ' 条）');
-        more.type = 'button';
-        more.onclick = function () {
-          more.disabled = true;
-          more.textContent = '加载中…';
-          cWant += 50;
-          loadChanges();
-        };
-        cList.appendChild(more);
-      }
+      cHasMore = !!d.has_more;
+      renderChanges();
     }).catch(function (e) {
       cList.innerHTML = '';
       cList.appendChild(el('div', 'err-box', '变更记录读取失败：' + e.message));
+    }).finally(function () { cLoading = false; });
+  }
+
+  function renderChanges() {
+    // 标题要如实反映「看到的是哪一段」：筛了类型还说「最近 10 条」，
+    // 用户会以为这类事件一共就这么多。
+    var seg = cKind ? (chgWord[cKind] || cKind) + ' · ' : '';
+    var shown = cItems.length + (cHasMore ? '+' : '');
+    $('#c-total').textContent = seg + (cItems.length ? shown + ' 条' : '0 条');
+    cList.innerHTML = '';
+    if (!cItems.length) {
+      cList.appendChild(el('div', 'hint small-hint', cKind
+        ? '这段时间里没有「' + (chgWord[cKind] || cKind) + '」类事件。换个类型看看，或者等下一次巡检。'
+        : '暂无变更记录。加入监控后，只有业务字段真的变了才会出现在这里。'));
+      return;
+    }
+    cItems.forEach(function (c) {
+      var box = el('div', 'chg');
+      var head = el('div', 'chg-head');
+      var domBtn = el('button', null, c.domain);
+      domBtn.type = 'button';
+      domBtn.style.cssText = 'padding:0;font-size:14px;font-weight:600;color:var(--fg);background:none;border:0;cursor:pointer;font-family:inherit';
+      domBtn.onclick = function () { input.value = c.domain; submit(); };
+      head.appendChild(domBtn);
+      if (c.kind === 'revoked') head.appendChild(el('span', 'badge err', '注销'));
+      else if (c.kind === 'registered') head.appendChild(el('span', 'badge', '新增'));
+      else if (c.kind === 'upstream_error') head.appendChild(el('span', 'badge err', '上游异常'));
+      else if (c.kind === 'recovered') head.appendChild(el('span', 'badge', '已恢复'));
+      if (c.icp_code) head.appendChild(el('span', 'badge', c.icp_code));
+      head.appendChild(el('span', 'when', when(c.at)));
+      box.appendChild(head);
+
+      var diff = el('div', 'chg-diff');
+      if (c.diff && c.diff.length) {
+        diff.appendChild(document.createTextNode(c.diff.map(function (x) {
+          return x.field + '：' + (x.from || '无') + ' → ' + (x.to || '无');
+        }).join('；')));
+      } else {
+        diff.appendChild(document.createTextNode('备案信息发生变化'));
+      }
+      box.appendChild(diff);
+      cList.appendChild(box);
     });
+    if (cHasMore) {
+      // 「还有更多」必须写出来：只说「加载更多」，用户不知道点下去还有几次；
+      // 而流水本身有保留上限（默认 2000 条），翻到那儿就真的没有了。
+      var more = el('button', 'ghost small more', '加载更早的（每次 ' + CHG_PAGE + ' 条，已加载 ' + cItems.length + ' 条）');
+      more.type = 'button';
+      more.onclick = function () {
+        more.disabled = true;
+        more.textContent = '加载中…';
+        loadChanges(true);
+      };
+      cList.appendChild(more);
+    }
   }
 
   /* 「N+ 个异常」是可点的：点一下把全部监控项拉下来，数字才是真的。
@@ -637,8 +696,10 @@ function withKey(path) {
   if (cKindSel) {
     cKindSel.onchange = function () {
       cKind = cKindSel.value;
-      cWant = 10;
-      loadChanges();
+      // 换筛选条件等于换了一份数据集，累积的旧记录必须清掉，
+      // 否则「只看注销」的列表里会残留着上一种筛选拉回来的变更。
+      cItems = [];
+      loadChanges(false);
     };
   }
 
@@ -664,7 +725,9 @@ function withKey(path) {
     };
   }
   var cRefresh = $('#c-refresh');
-  if (cRefresh) cRefresh.onclick = loadChanges;
+  // 手动刷新回到「只加载第一页」：用户点刷新想看的是现在怎么样，
+  // 不是接着往下翻（那是「加载更早的」按钮的活）。
+  if (cRefresh) cRefresh.onclick = function () { cItems = []; loadChanges(false); };
 
   /* ---- 数据源面板 ---- */
   var pList = $('#p-list');
