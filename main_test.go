@@ -160,3 +160,25 @@ func TestCLIBadConfig(t *testing.T) {
 		t.Fatalf("非法配置应报错，实际输出: %s", out)
 	}
 }
+
+// -c 是帮助里承诺的通用参数，所有子命令都得认。
+// 之前只有 serve 认它，`beian2api doctor -c x.yaml` 会直接报 flag not defined。
+func TestCLIAllCommandsAcceptConfigShorthand(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := "listen: \":18099\"\ndata_dir: \"" + dir + "/data\"\nlog_level: \"error\"\nproviders:\n  - name: mock\n    enabled: true\n    weight: 100\n    timeout: 3\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := buildBinary(t)
+	for _, args := range [][]string{
+		{"config", "-c", cfgPath},
+		{"doctor", "-c", cfgPath},
+		{"export", "-c", cfgPath, "-o", filepath.Join(dir, "dump.json")},
+	} {
+		out, err := runCmd(t, bin, filepath.Join(dir, "data"), args...)
+		if err != nil {
+			t.Fatalf("%v 应成功: %v\n%s", args, err, out)
+		}
+	}
+}

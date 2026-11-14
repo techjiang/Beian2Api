@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/asoe/beian2api/internal/api"
 	"github.com/asoe/beian2api/internal/config"
+	"github.com/asoe/beian2api/internal/notify"
 	"github.com/asoe/beian2api/internal/provider"
 	"github.com/asoe/beian2api/internal/service"
 	"github.com/asoe/beian2api/internal/store"
@@ -141,6 +143,47 @@ func buildTasks(cfg *config.Config) ([]provider.Task, error) {
 	return tasks, nil
 }
 
+// buildNotifier 按配置构造推送器，并把状态接上存储。
+//
+// 状态落盘不是为了好看：推送失败大多发生在无人值守的定时巡检里，
+// 不落盘就没人会发现「昨晚所有推送都挂了」。
+func buildNotifier(cfg *config.Config, st *store.Store, log *slog.Logger) *notify.Dispatcher {
+	var chs []notify.Channel
+	for _, c := range cfg.Channels() {
+		chs = append(chs, notify.Channel{
+			Name: c.Name, Kind: c.Kind, URL: c.URL,
+			Secret: c.Secret, Events: c.Events, Disabled: c.Disabled,
+		})
+	}
+	d := notify.New(chs, log).WithRetries(cfg.Notify.Retries, 0)
+	if saved, err := st.NotifyStates(); err == nil && len(saved) > 0 {
+		// 只保留仍然存在的通道，改过配置后别留幽灵状态。
+		live := map[string]notify.State{}
+		names := map[string]struct{}{}
+		for _, ch := range d.Channels() {
+			names[ch.Name] = struct{}{}
+			if v, ok := saved[ch.Name]; ok {
+				live[ch.Name] = v
+			}
+		}
+		d.Seed(live)
+		_ = st.PurgeNotifyState(names)
+	}
+	return d.WithRecorder(func(s notify.State) { _ = st.PutNotifyState(s) })
+}
+
+// baseURL 推断对外地址：优先配置，其次本地监听地址，用于推送里的详情链接。
+func baseURL(cfg *config.Config) string {
+	if cfg.BaseURL != "" {
+		return cfg.BaseURL
+	}
+	addr := cfg.Listen
+	if strings.HasPrefix(addr, ":") {
+		return "http://127.0.0.1" + addr
+	}
+	return "http://" + addr
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "配置文件路径")
@@ -162,12 +205,18 @@ func cmdServe(args []string) error {
 	}
 	svc := service.New(cfg, st, tasks, log)
 
+	notifier := buildNotifier(cfg, st, log)
 	var w *watch.Watcher
 	if cfg.Watch.Enabled {
-		w = watch.New(svc, st, cfg.WatchInterval(), cfg.Watch.Workers, cfg.Watch.Webhook, log)
+		w = watch.New(svc, st, cfg.WatchInterval(), cfg.Watch.Workers, notifier, log).WithBaseURL(baseURL(cfg))
 	}
 
-	srv := api.New(api.Options{Config: cfg, Service: svc, Watch: w, Log: log, Version: version})
+	if notifier.Enabled() {
+		log.Info("变更推送已启用", "channels", len(notifier.Channels()))
+	}
+
+	base := baseURL(cfg)
+	srv := api.New(api.Options{Config: cfg, Service: svc, Watch: w, Notify: notifier, BaseURL: base, Log: log, Version: version})
 	httpSrv := &httpServer{addr: cfg.Listen, handler: srv.Handler()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -215,6 +264,7 @@ func cmdServe(args []string) error {
 func cmdConfig(args []string) error {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "配置文件路径")
+	fs.StringVar(cfgPath, "c", "", "配置文件路径")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

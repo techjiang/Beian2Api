@@ -97,6 +97,19 @@
     <div class="card panel" style="margin-top:12px">
       <div class="panel-head">
         <div class="panel-title">
+          <span>推送通道</span>
+          <span class="pill" id="n-total">–</span>
+        </div>
+        <div class="panel-acts">
+          <button class="ghost small" id="n-test" type="button">发测试消息</button>
+        </div>
+      </div>
+      <div id="n-list"><div class="hint small-hint">还没有配置推送通道。在 config.yaml 里加 notify.channels，或设 BEIAN2API_WEBHOOK。</div></div>
+    </div>
+
+    <div class="card panel" style="margin-top:12px">
+      <div class="panel-head">
+        <div class="panel-title">
           <span>最近变更</span>
           <span class="pill" id="c-total">–</span>
         </div>

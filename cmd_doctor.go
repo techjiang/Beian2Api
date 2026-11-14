@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/asoe/beian2api/internal/notify"
 	"github.com/asoe/beian2api/internal/provider"
 )
 
@@ -17,6 +18,7 @@ import (
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "配置文件路径")
+	fs.StringVar(cfgPath, "c", "", "配置文件路径")
 	probe := fs.String("domain", "example.com", "用于探测上游的域名")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -68,6 +70,22 @@ func cmdDoctor(args []string) error {
 			fmt.Printf("  ✔ %-8s %6.0fms  连通（该域名无备案）\n", t.Provider.Name(), cost)
 		default:
 			fmt.Printf("  ! %-8s %6.0fms  %v\n", t.Provider.Name(), cost, err)
+		}
+	}
+
+	// 推送通道只报「配了几个、什么类型」，不回显地址——机器人 URL 本身就是凭据。
+	chs := cfg.Channels()
+	if len(chs) == 0 {
+		fmt.Println("推送通道:  未配置（变更只会写进首页/RSS，不会推送到群）")
+	} else {
+		fmt.Println("推送通道:")
+		for _, c := range chs {
+			kind := notify.NormalizeKind(c.Kind, c.URL)
+			name := c.Name
+			if name == "" {
+				name = kind
+			}
+			fmt.Printf("  ✔ %-10s %-9s 需在 IM 里实际收到一条才算配通\n", name, kind)
 		}
 	}
 

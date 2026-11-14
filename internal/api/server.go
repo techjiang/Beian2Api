@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/asoe/beian2api/internal/config"
+	"github.com/asoe/beian2api/internal/notify"
 	"github.com/asoe/beian2api/internal/service"
 	"github.com/asoe/beian2api/internal/watch"
 )
@@ -18,6 +19,8 @@ type Server struct {
 	cfg            *config.Config
 	svc            *service.Service
 	watch          *watch.Watcher
+	notifier       *notify.Dispatcher
+	baseURL        string
 	log            *slog.Logger
 	startAt        time.Time
 	version        string
@@ -32,6 +35,8 @@ type Options struct {
 	Config  *config.Config
 	Service *service.Service
 	Watch   *watch.Watcher
+	Notify  *notify.Dispatcher
+	BaseURL string
 	Log     *slog.Logger
 	Version string
 }
@@ -39,7 +44,7 @@ type Options struct {
 // New 构造 Server。
 func New(o Options) *Server {
 	s := &Server{
-		cfg: o.Config, svc: o.Service, watch: o.Watch, log: o.Log,
+		cfg: o.Config, svc: o.Service, watch: o.Watch, notifier: o.Notify, baseURL: o.BaseURL, log: o.Log,
 		startAt: time.Now(), version: o.Version,
 		keys: o.Config.Auth.Keys, origins: o.Config.CORS,
 	}
@@ -74,6 +79,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/providers", s.withRateLimit(s.withAuth(s.handleProviders)))
 	mux.HandleFunc("/api/v1/changes", s.withRateLimit(s.withAuth(s.handleChanges)))
 	mux.HandleFunc("/api/v1/changes.rss", s.handleRSS)
+	mux.HandleFunc("/api/v1/notify/status", s.withRateLimit(s.withAuth(s.handleNotifyStatus)))
+	mux.HandleFunc("/api/v1/notify/test", s.withRateLimit(s.withAuth(s.handleNotifyTest)))
 	mux.HandleFunc("/api/v1/verify", s.withRateLimit(s.withAuth(s.handleVerify)))
 	mux.HandleFunc("/api/v1/admin/backup", s.withRateLimit(s.withAuth(s.handleAdminBackup)))
 	mux.HandleFunc("/api/v1/openapi.json", s.handleOpenAPI)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/asoe/beian2api/internal/config"
 	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/notify"
 	"github.com/asoe/beian2api/internal/provider"
 	"github.com/asoe/beian2api/internal/service"
 	"github.com/asoe/beian2api/internal/store"
@@ -46,7 +47,14 @@ func setup(t *testing.T) (*Watcher, *store.Store, *stub) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sb := &stub{recs: []model.Record{normalize("京ICP备1号-1", "示例公司")}}
 	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
-	return New(svc, st, time.Hour, 2, "", log), st, sb
+	return New(svc, st, time.Hour, 2, nil, log), st, sb
+}
+
+// testNotifier 构造一个只含单个通道的推送器，重试压到最快，避免测试等退避。
+func testNotifier(t *testing.T, url, kind string) *notify.Dispatcher {
+	t.Helper()
+	d := notify.New([]notify.Channel{{Name: "t", Kind: kind, URL: url}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return d.WithRetries(1, time.Millisecond)
 }
 
 func normalize(icp, unit string) model.Record {
@@ -136,7 +144,7 @@ func TestWebhookDelivery(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sb := &stub{recs: []model.Record{normalize("京ICP备1号-1", "示例公司")}}
 	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
-	w := New(svc, st, time.Hour, 1, srv.URL, log)
+	w := New(svc, st, time.Hour, 1, testNotifier(t, srv.URL, "generic"), log).WithBaseURL("https://beian.example.com")
 
 	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
 	w.RunOnce(context.Background()) // 建立基线
@@ -175,7 +183,7 @@ func TestWebhookUnreachable(t *testing.T) {
 	sb := &stub{recs: []model.Record{normalize("京ICP备1号-1", "A")}}
 	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
 	// 指向一个必然失败的地址，验证不会 panic、主流程照常返回
-	w := New(svc, st, time.Hour, 1, "http://127.0.0.1:1/none", log)
+	w := New(svc, st, time.Hour, 1, testNotifier(t, "http://127.0.0.1:1/none", "generic"), log)
 	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
 	w.RunOnce(context.Background())
 	sb.recs = []model.Record{normalize("京ICP备2号-1", "A")}
@@ -183,7 +191,7 @@ func TestWebhookUnreachable(t *testing.T) {
 	if len(changes) != 1 {
 		t.Fatalf("推送失败不应影响变更检测，实际 %d", len(changes))
 	}
-	time.Sleep(200 * time.Millisecond)
+	w.notifier.Wait()
 }
 
 // 备案被注销也是变更：上游从"有记录"变成"明确无备案"。
@@ -300,5 +308,101 @@ func TestFirstDelayRespectsLastRun(t *testing.T) {
 	_ = st.SetStat(metaLastRun, model.Now()-2*86400)
 	if d := w.firstDelay(); d != 30*time.Second {
 		t.Fatalf("过期后应 30 秒补跑，实际 %v", d)
+	}
+}
+
+// 变更要按通道类型分别成型，并把详情链接带上：
+// 群里看到「备案号变了」却点不进去查，等于只报了一半。
+func TestDispatchPerKind(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string]map[string]any{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		mu.Lock()
+		if _, ok := m["msgtype"]; ok {
+			got["dingtalk"] = m
+		} else {
+			got["feishu"] = m
+		}
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"errcode":0,"code":0}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	_ = cfg.Validate()
+	st, _ := store.Open(dir)
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sb := &stub{recs: []model.Record{normalize("京ICP备1号-1", "示例公司")}}
+	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
+	d := notify.New([]notify.Channel{
+		{Name: "dd", Kind: notify.KindDingTalk, URL: srv.URL},
+		{Name: "fs", Kind: notify.KindFeishu, URL: srv.URL},
+	}, log).WithRetries(1, time.Millisecond)
+	w := New(svc, st, time.Hour, 2, d, log).WithBaseURL("https://beian.example.com")
+
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	w.RunOnce(context.Background())
+	sb.recs = []model.Record{normalize("京ICP备2号-1", "示例公司")}
+	if ch := w.RunOnce(context.Background()); len(ch) != 1 {
+		t.Fatalf("应检测到 1 条变更，实际 %d", len(ch))
+	}
+	d.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("两个通道都应收到消息，实际 %d", len(got))
+	}
+	dd := got["dingtalk"]
+	md, _ := dd["markdown"].(map[string]any)
+	if md == nil || !strings.Contains(md["text"].(string), "详情：https://beian.example.com/?domain=example.com") {
+		t.Fatalf("钉钉消息应带详情链接: %v", dd)
+	}
+	fs := got["feishu"]
+	if fs["msg_type"] != "interactive" {
+		t.Fatalf("飞书应收到卡片消息: %v", fs)
+	}
+	states := d.States()
+	if states["dd"].Failed != 0 || states["dd"].OK != 1 {
+		t.Fatalf("投递状态不对: %+v", states)
+	}
+}
+
+// 推送慢不能拖住巡检：一次巡检要在推送结束前就返回。
+func TestDispatchDoesNotBlock(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		_, _ = w.Write([]byte(`{"errcode":0}`))
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	_ = cfg.Validate()
+	st, _ := store.Open(dir)
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sb := &stub{recs: []model.Record{normalize("京ICP备1号-1", "A")}}
+	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
+	d := notify.New([]notify.Channel{{Name: "g", Kind: notify.KindGeneric, URL: srv.URL}}, log)
+	w := New(svc, st, time.Hour, 1, d, log)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+	w.RunOnce(context.Background())
+	sb.recs = []model.Record{normalize("京ICP备2号-1", "A")}
+
+	done := make(chan struct{})
+	go func() { w.RunOnce(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("推送阻塞了巡检主流程")
 	}
 }

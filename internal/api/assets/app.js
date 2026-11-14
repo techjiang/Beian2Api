@@ -343,11 +343,83 @@
   var cRefresh = $('#c-refresh');
   if (cRefresh) cRefresh.onclick = loadChanges;
 
+  /* ---- 推送通道 ---- */
+  var nList = $('#n-list');
+  var kindName = { dingtalk: '钉钉', wecom: '企业微信', feishu: '飞书', slack: 'Slack', generic: 'HTTP' };
+
+  function loadNotify() {
+    if (!nList) return;
+    api('/api/v1/notify/status').then(function (d) {
+      $('#n-total').textContent = d.total ? d.total + ' 个' : '未配置';
+      nList.innerHTML = '';
+      if (!d.enabled) {
+        nList.appendChild(el('div', 'hint small-hint', '还没有配置推送通道。在 config.yaml 里加 notify.channels，或设 BEIAN2API_WEBHOOK。'));
+        return;
+      }
+      var box = el('div', 'row-list');
+      d.channels.forEach(function (c) {
+        var row = el('div', 'row');
+        var dom = el('div', 'dom');
+        dom.appendChild(el('span', null, c.name));
+        row.appendChild(dom);
+
+        var sub = el('div', 'sub', (kindName[c.kind] || c.kind));
+        if (c.events && c.events.length) sub.textContent += ' · 只推 ' + c.events.length + ' 类事件';
+        row.appendChild(sub);
+
+        if (!c.last_at) {
+          row.appendChild(el('span', 'badge gray', '未推送过'));
+        } else if (c.last_ok) {
+          var ok = el('span', 'badge', '推送正常');
+          ok.title = '成功 ' + c.ok + ' 条';
+          row.appendChild(ok);
+        } else {
+          var bad = el('span', 'badge err', '推送失败');
+          bad.title = c.last_error || '';
+          row.appendChild(bad);
+        }
+        var grow = el('div', 'grow');
+        var t = el('span', 'when', c.last_at ? when(c.last_at) : '');
+        grow.appendChild(t);
+        row.appendChild(grow);
+        box.appendChild(row);
+
+        if (c.last_error) {
+          var e = el('div', 'chg-diff err-text', c.last_error);
+          e.style.paddingLeft = '2px';
+          box.appendChild(e);
+        }
+      });
+      nList.appendChild(box);
+    }).catch(function (e) {
+      nList.innerHTML = '';
+      nList.appendChild(el('div', 'err-box', '推送状态读取失败：' + e.message));
+    });
+  }
+
+  var nTest = $('#n-test');
+  if (nTest) {
+    nTest.onclick = function () {
+      nTest.disabled = true;
+      nTest.textContent = '发送中…';
+      api('/api/v1/notify/test', { method: 'POST' })
+        .then(function (d) {
+          nTest.textContent = d.ok === d.total ? '已送达 ' + d.total + ' 个通道' : '成功 ' + d.ok + ' / ' + d.total;
+          loadNotify();
+        })
+        .catch(function (e) { nTest.textContent = '失败：' + e.message; })
+        .finally(function () {
+          setTimeout(function () { nTest.disabled = false; nTest.textContent = '发测试消息'; }, 2600);
+        });
+    };
+  }
+
   // 「上次 / 下次」是相对时间，隔一段时间自己走一走，不用重新拉列表。
   setInterval(function () { rhythm(lastStatus); }, 30000);
 
   loadWatch();
   loadChanges();
+  loadNotify();
 
   var snippets = {
     curl: 'curl "' + location.origin + '/api/v1/query?domain=example.com"\n\n# 强制回源\ncurl "' + location.origin + '/api/v1/query?domain=example.com&refresh=1"\n\n# 批量\ncurl -X POST "' + location.origin + '/api/v1/batch" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"domains":["qq.com","baidu.com"]}\'',

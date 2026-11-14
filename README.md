@@ -168,21 +168,55 @@ curl -X POST localhost:8080/api/v1/watch \
   -H 'Content-Type: application/json' -d '{"domain":"example.com"}'
 ```
 
-推送地址支持钉钉、企业微信、飞书以及任意 HTTP 端点：
+推送支持钉钉、企业微信、飞书、Slack 和任意 HTTP 端点，可以同时配多个：
 
 ```yaml
-watch:
-  interval: 86400          # 秒
-  webhook: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+notify:
+  retries: 3
+  channels:
+    - name: 运维群
+      kind: dingtalk                      # 留空按 URL 自动识别
+      url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+      secret: ""                          # 机器人开了加签就填这里
+      events: [changed, revoked, registered]   # 省略即全推
+
+    - name: 飞书
+      url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
 ```
 
-不想配 Webhook 就用 RSS：`/api/v1/changes.rss`。
+容器里一行也能配完：
+
+```bash
+BEIAN2API_NOTIFY_CHANNELS="dingtalk:https://oapi.dingtalk.com/robot/send?access_token=xxx"
+```
+
+每家 IM 的协议不一样（钉钉要 `markdown.text`、企业微信要 `markdown.content`、
+飞书要 `interactive.card`），所以按通道类型分别成型，而不是塞一个「谁都能收」的扁平包。
+
+两个容易被忽略的坑，这里都处理了：
+
+- **HTTP 200 不代表送达**。钉钉和企业微信在 token 失效、关键词不匹配、被限流时照样返回 200，
+  真正的错误藏在响应体的 `errcode` 里。只看状态码会把「一条都没发出去」记成成功。
+  现在会解析响应体，并且区分「重试有用」（5xx / 限流）和「重试没用」（token 错、关键词不匹配）。
+- **推送慢不该拖住巡检**。投递在后台跑，一轮巡检不会因为某个群机器人卡 10 秒而被拖住。
+
+配完想确认通不通，点首页「发测试消息」，或直接打：
+
+```bash
+curl -X POST localhost:8080/api/v1/notify/test
+```
+
+每个通道最近一次推送成功与否会落盘并显示在首页，失败原因（上游 errcode/errmsg）直接摊开——
+深夜定时巡检挂掉这件事，总得有人知道。
+
+不想配推送就用 RSS：`/api/v1/changes.rss`。
 
 三类事件都会报：备案信息变了（`changed`）、之前有备案现在查不到了（`revoked`，多半是被注销）、
 之前没备案现在有了（`registered`）。巡检间隔改了或服务重启了都不会重置节奏——
 首轮时机按「上次巡检时间 + 间隔」推算，不会因为你重启服务就额外打一轮上游。
 
 首页的监控面板会显示「上次 12 分钟前 · 下次 6 小时后」，也可以直接调 `/api/v1/watch/status`。
+推送通道的最近状态在同一页的「推送通道」面板里，`/api/v1/notify/status` 是它的数据源。
 
 ## 部署
 
@@ -203,7 +237,8 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_API_KEYS` | 空 | 启用鉴权的 Key，逗号分隔 |
 | `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重，0 即禁用 |
 | `BEIAN2API_TTL` | `21600` | 缓存秒数 |
-| `BEIAN2API_WEBHOOK` | 空 | 变更推送地址 |
+| `BEIAN2API_WEBHOOK` | 空 | 变更推送地址（单通道，等价于一个 generic 通道） |
+| `BEIAN2API_NOTIFY_CHANNELS` | 空 | 多通道推送，形如 `dingtalk:<url>,wecom:<url>` |
 | `BEIAN2API_WATCH_INTERVAL` | `86400` | 巡检间隔，支持 `30m` / `6h` / 秒数 |
 | `BEIAN2API_WATCH_ENABLED` | `true` | 是否启用自动巡检 |
 

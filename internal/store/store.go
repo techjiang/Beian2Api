@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/notify"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -24,6 +25,7 @@ var (
 	bucketMeta    = []byte("meta")    // 计数器等
 	bucketKeys    = []byte("apikeys") // key -> KeyMeta
 	bucketChanges = []byte("changes") // changeID -> Change
+	bucketNotify  = []byte("notify")  // channel -> State
 )
 
 // ErrNotFound 表示 key 不存在。
@@ -81,7 +83,7 @@ func OpenFile(path string) (*Store, error) {
 	}
 	s := &Store{db: db, path: path}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketCache, bucketHistory, bucketWatch, bucketMeta, bucketKeys, bucketChanges} {
+		for _, b := range [][]byte{bucketCache, bucketHistory, bucketWatch, bucketMeta, bucketKeys, bucketChanges, bucketNotify} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -239,6 +241,7 @@ type Counts struct {
 	Watch   int `json:"watch"`
 	Keys    int `json:"keys"`
 	Changes int `json:"changes"`
+	Notify  int `json:"notify"`
 }
 
 // Count 返回各 bucket 条目数。
@@ -250,6 +253,7 @@ func (s *Store) Count() (Counts, error) {
 		c.Watch = tx.Bucket(bucketWatch).Stats().KeyN
 		c.Keys = tx.Bucket(bucketKeys).Stats().KeyN
 		c.Changes = tx.Bucket(bucketChanges).Stats().KeyN
+		c.Notify = tx.Bucket(bucketNotify).Stats().KeyN
 		return nil
 	})
 	return c, err
@@ -379,6 +383,55 @@ func (s *Store) ListChanges(limit int, fn func(raw []byte) (keep bool, err error
 			n++
 			if n >= limit {
 				break
+			}
+		}
+		return nil
+	})
+}
+
+// PutNotifyState 保存某个推送通道的最近投递状态。
+//
+// 落盘的原因：推送失败是最需要被人看见的事，而它往往发生在深夜的定时巡检里。
+// 内存态重启即丢，等于「昨晚三次推送全挂了」这件事永远没人知道。
+func (s *Store) PutNotifyState(v notify.State) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketNotify).Put([]byte(v.Name), b)
+	})
+}
+
+// NotifyStates 读取全部推送通道状态，key 为通道名。
+func (s *Store) NotifyStates() (map[string]notify.State, error) {
+	out := map[string]notify.State{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketNotify).ForEach(func(k, v []byte) error {
+			var st notify.State
+			if json.Unmarshal(v, &st) == nil {
+				out[string(k)] = st
+			}
+			return nil
+		})
+	})
+	return out, err
+}
+
+// PurgeNotifyState 删除不在 names 里的通道状态，避免改配置后遗留幽灵通道。
+func (s *Store) PurgeNotifyState(names map[string]struct{}) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketNotify)
+		var stale [][]byte
+		_ = b.ForEach(func(k, v []byte) error {
+			if _, ok := names[string(k)]; !ok {
+				stale = append(stale, append([]byte(nil), k...))
+			}
+			return nil
+		})
+		for _, k := range stale {
+			if err := b.Delete(k); err != nil {
+				return err
 			}
 		}
 		return nil

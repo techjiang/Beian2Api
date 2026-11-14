@@ -15,6 +15,7 @@ import (
 
 	"github.com/asoe/beian2api/internal/config"
 	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/notify"
 	"github.com/asoe/beian2api/internal/provider"
 	"github.com/asoe/beian2api/internal/service"
 	"github.com/asoe/beian2api/internal/store"
@@ -297,7 +298,7 @@ func mkWatchServer(t *testing.T) (*Server, http.Handler, *stub) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sb := &stub{recs: []model.Record{}}
 	svc := service.New(cfg, st, []provider.Task{{Provider: sb, Timeout: time.Second}}, log)
-	w := watch.New(svc, st, time.Hour, 2, "", log)
+	w := watch.New(svc, st, time.Hour, 2, nil, log)
 	s := New(Options{Config: cfg, Service: svc, Watch: w, Log: log, Version: "test"})
 	return s, s.Handler(), sb
 }
@@ -335,5 +336,96 @@ func TestWatchRunSurvivesCanceledClient(t *testing.T) {
 	}
 	if item.LastFP == "" {
 		t.Fatal("巡检应写入基线，说明请求 ctx 取消不该中断它")
+	}
+}
+
+func mkNotifyServer(t *testing.T, hookURL string) (http.Handler, *notify.Dispatcher) {
+	t.Helper()
+	s, _ := mkServer(t, nil)
+	var chs []notify.Channel
+	if hookURL != "" {
+		chs = []notify.Channel{
+			{Name: "dd", Kind: notify.KindDingTalk, URL: hookURL},
+			{Name: "fs", Kind: notify.KindFeishu, URL: hookURL},
+		}
+	}
+	d := notify.New(chs, slog.New(slog.NewTextHandler(io.Discard, nil))).WithRetries(1, time.Millisecond)
+	s.notifier = d
+	return s.Handler(), d
+}
+
+func TestNotifyStatusWithoutChannels(t *testing.T) {
+	h, _ := mkNotifyServer(t, "")
+	_, body := get(t, h, "/api/v1/notify/status", nil)
+	if !strings.Contains(body, `"enabled":false`) {
+		t.Fatalf("无通道时应如实报告: %s", body)
+	}
+	// 没配通道时发测试消息应给明确错误，而不是静默成功
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notify/test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("未配置通道应 503，实际 %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNotifyTestDelivers(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		_, _ = w.Write([]byte(`{"errcode":0,"code":0}`))
+	}))
+	defer srv.Close()
+	h, _ := mkNotifyServer(t, srv.URL)
+
+	_, body := get(t, h, "/api/v1/notify/status", nil)
+	if !strings.Contains(body, `"enabled":true`) || !strings.Contains(body, `"kind":"dingtalk"`) {
+		t.Fatalf("通道列表不对: %s", body)
+	}
+	if strings.Contains(body, srv.URL) {
+		t.Fatal("状态接口不得回显 webhook 地址（地址本身就是凭据）")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notify/test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("测试推送失败 %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"ok":2`) {
+		t.Fatalf("两个通道都应成功: %s", w.Body.String())
+	}
+	if n != 2 {
+		t.Fatalf("应发出 2 条请求，实际 %d", n)
+	}
+
+	// 发完之后状态接口要能反映成功
+	_, body = get(t, h, "/api/v1/notify/status", nil)
+	if !strings.Contains(body, `"last_ok":true`) {
+		t.Fatalf("状态应记为成功: %s", body)
+	}
+}
+
+func TestNotifyTestReportsSemanticFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"errcode":310000,"errmsg":"sign not match"}`))
+	}))
+	defer srv.Close()
+	h, _ := mkNotifyServer(t, srv.URL)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notify/test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), `"ok":0`) || !strings.Contains(w.Body.String(), "310000") {
+		t.Fatalf("上游 errcode 必须透出给用户: %s", w.Body.String())
+	}
+}
+
+func TestNotifyTestMethodNotAllowed(t *testing.T) {
+	h, _ := mkNotifyServer(t, "http://127.0.0.1:1/x")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/notify/test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("应 405，实际 %d", w.Code)
 	}
 }

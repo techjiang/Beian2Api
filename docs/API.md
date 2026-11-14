@@ -309,6 +309,56 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 ---
 
+## GET /api/v1/notify/status
+
+推送通道与最近一次投递状态。不回显通道 URL 与密钥——机器人地址本身就是凭据。
+
+```json
+{
+  "ok": true,
+  "data": {
+    "enabled": true,
+    "total": 2,
+    "channels": [{
+      "name": "运维群",
+      "kind": "dingtalk",
+      "events": ["changed", "revoked", "registered"],
+      "last_at": 1735776000,
+      "last_ok": true,
+      "ok": 12,
+      "failed": 0,
+      "attempts": 1
+    }]
+  }
+}
+```
+
+未配置任何通道时返回 `enabled=false`，不会 404。
+
+## POST /api/v1/notify/test
+
+立刻往全部通道发一条测试消息，同步返回每个通道的真实投递结果：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "total": 2,
+    "ok": 1,
+    "results": [
+      { "channel": "运维群", "kind": "dingtalk", "ok": true, "attempts": 1 },
+      { "channel": "飞书", "kind": "feishu", "ok": false, "attempts": 1,
+        "error": "接口返回错误 code=19001: param invalid" }
+    ]
+  }
+}
+```
+
+这是验证配置的唯一可靠办法：钉钉、企业微信在 token 失效或关键词不匹配时
+同样返回 HTTP 200，只看状态码看不出问题。`error` 里会带上游原始错误码与说明。
+
+---
+
 ## GET /badge/icp.svg
 
 SVG 徽章，可直接嵌进 README。

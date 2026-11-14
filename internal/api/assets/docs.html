@@ -104,7 +104,14 @@
   <div class="ep"><span class="method del">DELETE</span>/api/v1/watch?domain=example.com</div>
   <div class="ep"><span class="method get">GET</span>/api/v1/watch/list</div>
   <div class="ep"><span class="method post">POST</span>/api/v1/watch/run</div>
-  <p>立即执行一轮巡检，返回本次发现的变更。配置 <code>watch.webhook</code> 后变更会推送到钉钉 / 企业微信 / 飞书 / 任意 HTTP 端点。</p>
+  <p>立即执行一轮巡检，返回本次发现的变更。配置 <code>notify.channels</code> 后变更会推送到钉钉 / 企业微信 / 飞书 / Slack / 任意 HTTP 端点。</p>
+
+  <div class="ep"><span class="method get">GET</span>/api/v1/notify/status</div>
+  <p>各推送通道最近一次投递的成败与失败原因。不回显通道地址——机器人 URL 本身就是凭据。</p>
+  <div class="ep"><span class="method post">POST</span>/api/v1/notify/test</div>
+  <p>立刻往全部通道发一条测试消息，返回每个通道的真实结果。</p>
+  <p>验证推送配置时请用这个接口，别只看配置文件写没写对：钉钉与企业微信在 token 失效、
+  关键词不匹配时一样返回 HTTP 200，真错误藏在响应体的 <code>errcode</code> 里。</p>
 
   <hr>
   <div class="ep"><span class="method get">GET</span>/api/v1/verify</div>

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/notify"
 )
 
 func open(t *testing.T) *Store {
@@ -173,5 +174,41 @@ func TestSetStatIsNotIncrement(t *testing.T) {
 	}
 	if got := st.Stat("nope"); got != 0 {
 		t.Fatalf("不存在的键应返回 0，实际 %d", got)
+	}
+}
+
+func TestNotifyStateRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.PutNotifyState(notify.State{Name: "dd", Kind: "dingtalk", LastOK: false, LastError: "310000"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutNotifyState(notify.State{Name: "fs", Kind: "feishu", LastOK: true, OK: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.NotifyStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["dd"].LastError != "310000" || !got["fs"].LastOK {
+		t.Fatalf("状态读取不对: %+v", got)
+	}
+	c, _ := s.Count()
+	if c.Notify != 2 {
+		t.Fatalf("计数不对: %+v", c)
+	}
+
+	// 改配置删掉一个通道后，遗留状态要能被清掉，否则首页会显示幽灵通道
+	if err := s.PurgeNotifyState(map[string]struct{}{"fs": {}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.NotifyStates()
+	if len(got) != 1 || got["fs"].Name != "fs" {
+		t.Fatalf("清理后应只剩 fs: %+v", got)
 	}
 }

@@ -41,4 +41,27 @@ watch:
   enabled: true
   interval: 86400      # 每 24 小时巡检一次
   workers: 4
-  webhook: ""          # 变更推送：钉钉/企业微信/飞书/任意 HTTP
+  webhook: ""          # 旧字段，等价于一个 generic 通道；多渠道请用下面的 notify
+
+notify:
+  retries: 3           # 单条消息最多投递几次（含首次），只对网络错误与限流生效
+  channels:
+    # kind 留空会按 URL 自动识别；也可以显式写 dingtalk / wecom / feishu / slack / generic
+    - name: 运维群
+      kind: dingtalk
+      url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+      # 机器人开了「加签」时填这里，会自动补 timestamp 与 sign
+      secret: ""
+      # 只推指定事件：changed / revoked / registered；省略即全推
+      events: [changed, revoked, registered]
+
+    # - name: 企业微信
+    #   url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+
+    # - name: 飞书
+    #   url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
+    #   secret: ""        # 飞书签名校验密钥
+
+    # - name: 自建网关
+    #   kind: generic
+    #   url: "https://your-gateway/hook"

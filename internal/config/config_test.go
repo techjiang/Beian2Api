@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -123,5 +124,91 @@ func TestWatchIntervalFromEnv(t *testing.T) {
 	c, _ = Load("")
 	if c.Watch.Interval != 90 {
 		t.Fatalf("纯数字应按秒解析，实际 %d", c.Watch.Interval)
+	}
+}
+
+func TestNotifyChannelsFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `
+notify:
+  retries: 4
+  channels:
+    - name: 运维群
+      kind: dingtalk
+      url: https://oapi.dingtalk.com/robot/send?access_token=x
+      secret: SECxxx
+      events: [changed, revoked]
+    - name: 备用
+      url: https://open.feishu.cn/open-apis/bot/v2/hook/y
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Notify.Retries != 4 || len(c.Channels()) != 2 {
+		t.Fatalf("通道配置未生效: %+v", c.Notify)
+	}
+	if c.Channels()[0].Secret != "SECxxx" || len(c.Channels()[0].Events) != 2 {
+		t.Fatalf("通道字段丢失: %+v", c.Channels()[0])
+	}
+}
+
+// 旧的 watch.webhook 不能因为升级就失效：老用户只改了版本，其他都没动。
+func TestLegacyWebhookStillWorks(t *testing.T) {
+	c := Default()
+	c.Watch.Webhook = "https://oapi.dingtalk.com/robot/send?access_token=old"
+	chs := c.Channels()
+	if len(chs) != 1 || chs[0].URL != c.Watch.Webhook {
+		t.Fatalf("旧配置应降级成一个通道: %+v", chs)
+	}
+	// 新配置里已有同一个地址时不重复推送
+	c.Notify.Channels = []NotifyChannel{{Name: "a", URL: c.Watch.Webhook}}
+	if n := len(c.Channels()); n != 1 {
+		t.Fatalf("同一地址不应重复: %d", n)
+	}
+}
+
+func TestNotifyChannelsEnv(t *testing.T) {
+	t.Setenv("BEIAN2API_NOTIFY_CHANNELS",
+		"dingtalk:https://oapi.dingtalk.com/robot/send?access_token=a,https://my.gw/hook")
+	c, err := Load(filepath.Join(t.TempDir(), "none.yaml"))
+	if err == nil {
+		t.Fatalf("不存在的配置文件应报错: %+v", c)
+	}
+	c = Default()
+	c.applyEnv()
+	chs := c.Channels()
+	if len(chs) != 2 {
+		t.Fatalf("应解析出 2 个通道: %+v", chs)
+	}
+	if chs[0].Kind != "dingtalk" || !strings.Contains(chs[0].URL, "access_token=a") {
+		t.Fatalf("kind 与 url 切割不对: %+v", chs[0])
+	}
+	if chs[1].Kind != "" || chs[1].URL != "https://my.gw/hook" {
+		t.Fatalf("未写 kind 时应留空交由自动识别: %+v", chs[1])
+	}
+}
+
+func TestNotifyValidation(t *testing.T) {
+	c := Default()
+	c.Notify.Channels = []NotifyChannel{{Name: "bad", URL: "ftp://x"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("非 http(s) 地址应报错")
+	}
+	c.Notify.Channels = []NotifyChannel{{Name: "empty"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("缺少 url 应报错")
+	}
+	c.Notify.Channels = nil
+	c.Notify.Retries = 99
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Notify.Retries > 10 {
+		t.Fatalf("重试次数上限应生效: %d", c.Notify.Retries)
 	}
 }

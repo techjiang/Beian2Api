@@ -2,6 +2,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.3.0] - 2026-11-14
+
+### 新增
+
+- 多通道推送：`notify.channels` 支持钉钉、企业微信、飞书、Slack、任意 HTTP，
+  可同时配多个，每个通道能只订阅部分事件（`changed` / `revoked` / `registered`）。
+  `kind` 留空会按 URL 自动识别。旧的 `watch.webhook` 继续有效，等价于一个 generic 通道。
+- 容器友好：`BEIAN2API_NOTIFY_CHANNELS="dingtalk:<url>,wecom:<url>"` 一行配完。
+- 按通道类型分别成型载荷：钉钉 `markdown.text`、企业微信 `markdown.content`、
+  飞书 `interactive.card`（按事件上色）、Slack `mrkdwn`。钉钉加签与飞书签名自动补。
+- `POST /api/v1/notify/test`：立刻往所有通道发一条测试消息，返回每个通道的真实结果。
+- `GET /api/v1/notify/status`：各通道最近一次投递成败与失败原因。首页新增「推送通道」面板，
+  带「发测试消息」按钮。
+- 投递状态落盘（`notify` bucket）：重启后仍能看到「上次推送失败」。改配置删掉的通道，
+  遗留状态会被清理，不会在首页留幽灵通道。
+
+### 修复
+
+- **HTTP 200 被当成送达**：钉钉/企业微信在 token 失效、关键词不匹配、被限流时同样返回 200，
+  错误藏在响应体 `errcode` 里。旧实现只看状态码，会把「一条都没发出去」记成成功。
+  现在解析响应体并区分可重试（5xx、限流）与不可重试（配置错误）——后者重试三次
+  只是把同一条错误打三遍。
+- **推送可能拖住巡检**：投递改为后台执行，慢通道不再占用巡检 goroutine。
+- 推送失败前会带退避重试（默认 3 次），避免网络抖动造成漏报。
+- **`-c` 只有 `serve` 认**：`--help` 把 `-c/--config` 写成通用参数，但 `doctor`、`config`、
+  `export`、`import`、`backup` 都不认它，照着帮助敲就报 `flag provided but not defined`。
+  现在所有子命令都接受 `-c`。
+
 ## [1.2.0] - 2026-11-14
 
 ### 新增

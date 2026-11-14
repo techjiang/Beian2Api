@@ -3,15 +3,13 @@
 package watch
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/asoe/beian2api/internal/model"
+	"github.com/asoe/beian2api/internal/notify"
 	"github.com/asoe/beian2api/internal/service"
 	"github.com/asoe/beian2api/internal/store"
 )
@@ -22,8 +20,8 @@ type Watcher struct {
 	st       *store.Store
 	interval time.Duration
 	workers  int
-	webhook  string
-	client   *http.Client
+	notifier *notify.Dispatcher
+	baseURL  string
 	log      Logger
 
 	// runMu 串行化巡检：定时器和「立即巡检」按钮可能同时触发，
@@ -65,8 +63,8 @@ type Change struct {
 	Current  *model.Record         `json:"current,omitempty"`
 }
 
-// New 构造 Watcher。
-func New(svc *service.Service, st *store.Store, interval time.Duration, workers int, webhook string, log Logger) *Watcher {
+// New 构造 Watcher。notifier 为 nil 时只记变更流水、不推送。
+func New(svc *service.Service, st *store.Store, interval time.Duration, workers int, notifier *notify.Dispatcher, log Logger) *Watcher {
 	if interval <= 0 {
 		interval = 24 * time.Hour
 	}
@@ -74,9 +72,8 @@ func New(svc *service.Service, st *store.Store, interval time.Duration, workers 
 		workers = 4
 	}
 	return &Watcher{
-		svc: svc, st: st, interval: interval, workers: workers, webhook: webhook,
-		client: &http.Client{Timeout: 10 * time.Second},
-		log:    log, stop: make(chan struct{}),
+		svc: svc, st: st, interval: interval, workers: workers, notifier: notifier,
+		log: log, stop: make(chan struct{}),
 	}
 }
 
@@ -118,6 +115,20 @@ func (w *Watcher) firstDelay() time.Duration {
 	}
 	// 已经过期：给 30 秒缓冲就补跑，别在启动瞬间和冷启动抢资源。
 	return 30 * time.Second
+}
+
+// WithBaseURL 设置对外访问地址，用于在推送消息里附上详情链接。
+func (w *Watcher) WithBaseURL(u string) *Watcher {
+	w.baseURL = u
+	return w
+}
+
+// Notifier 暴露推送器，供 API 层查询通道状态与发测试消息。
+func (w *Watcher) Notifier() *notify.Dispatcher {
+	if w == nil {
+		return nil
+	}
+	return w.notifier
 }
 
 // Stop 停止巡检。
@@ -291,56 +302,33 @@ func withParen(s string) string {
 	return "（" + s + "）"
 }
 
-// dispatch 推送 Webhook（支持通用 JSON 与钉钉/企业微信/飞书文本格式）。
+// dispatch 把变更交给 notifier。
+//
+// 推送不能占着巡检的 goroutine 同步做：一家 IM 超时 10 秒、再重试三次，
+// 一轮巡检就能被一条推不出去的消息拖住半分钟。SendAsync 直接返回，投递在后台跑。
 func (w *Watcher) dispatch(c Change) {
-	if w.webhook == "" {
+	if w.notifier == nil || !w.notifier.Enabled() {
 		return
 	}
-	text := fmt.Sprintf("备案%s：%s", kindLabel(c.Kind), c.Domain)
-	if c.ICPCode != "" {
-		text += "\n备案号：" + c.ICPCode
-	}
-	for _, d := range c.Diff {
-		text += fmt.Sprintf("\n%s：%s → %s", d.Field, emptyDash(d.From), emptyDash(d.To))
-	}
-	payload := map[string]any{
-		"event":    "icp.changed",
-		"kind":     c.Kind,
-		"domain":   c.Domain,
-		"at":       c.At,
-		"icp_code": c.ICPCode,
-		"diff":     c.Diff,
-		"text":     text,
-		"msgtype":  "text",
-		"content":  map[string]string{"text": text},
-		// 钉钉/企业微信兼容字段
-		"markdown": map[string]string{"title": "备案变更", "text": text},
-		"msg_type": "text",
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	go func() {
-		req, err := http.NewRequest(http.MethodPost, w.webhook, bytes.NewReader(b))
-		if err != nil {
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := w.client.Do(req)
-		if err != nil {
-			w.log.Warn("Webhook 推送失败", "err", err)
-			return
-		}
-		resp.Body.Close()
-	}()
+	w.notifier.SendAsync(notify.Event{
+		Kind:    c.Kind,
+		Domain:  c.Domain,
+		At:      c.At,
+		ICPCode: c.ICPCode,
+		Diff:    toNotifyFields(c.Diff),
+		BaseURL: w.baseURL,
+	})
 }
 
-func emptyDash(s string) string {
-	if s == "" {
-		return "-"
+func toNotifyFields(in []service.FieldChange) []notify.Field {
+	if len(in) == 0 {
+		return nil
 	}
-	return s
+	out := make([]notify.Field, 0, len(in))
+	for _, f := range in {
+		out = append(out, notify.Field{Field: f.Field, From: f.From, To: f.To})
+	}
+	return out
 }
 
 // Status 是巡检概况。

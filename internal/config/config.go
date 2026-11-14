@@ -50,10 +50,29 @@ type Config struct {
 		Enabled  bool   `yaml:"enabled" json:"enabled"`
 		Interval int    `yaml:"interval" json:"interval"` // 秒
 		Workers  int    `yaml:"workers" json:"workers"`
-		Webhook  string `yaml:"webhook" json:"webhook"`
+		Webhook  string `yaml:"webhook" json:"webhook"` // 兼容旧配置，等价于一个 generic 通道
 	} `yaml:"watch" json:"watch"`
 
+	Notify Notify `yaml:"notify" json:"notify"`
+
 	CORS []string `yaml:"cors" json:"cors"`
+}
+
+// NotifyChannel 是一个推送通道配置。
+type NotifyChannel struct {
+	Name     string   `yaml:"name" json:"name"`
+	Kind     string   `yaml:"kind" json:"kind"` // dingtalk / wecom / feishu / slack / generic，留空按 URL 识别
+	URL      string   `yaml:"url" json:"url"`
+	Secret   string   `yaml:"secret" json:"-"`
+	Events   []string `yaml:"events" json:"events"`
+	Disabled bool     `yaml:"disabled" json:"disabled"`
+}
+
+// Notify 是推送相关配置。
+type Notify struct {
+	// Retries 是单条消息的最大投递次数（含首次）。
+	Retries  int             `yaml:"retries" json:"retries"`
+	Channels []NotifyChannel `yaml:"channels" json:"channels"`
 }
 
 // Default 返回开箱即用的默认配置。零配置文件也能跑起来。
@@ -74,6 +93,7 @@ func Default() *Config {
 	c.Watch.Enabled = true
 	c.Watch.Interval = 86400
 	c.Watch.Workers = 4
+	c.Notify.Retries = 3
 	c.Providers = []Provider{
 		{Name: "miit", Enabled: true, Weight: 100, Timeout: 8},
 		{Name: "apihz", Enabled: true, Weight: 40, Timeout: 8},
@@ -130,6 +150,11 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("BEIAN2API_WEBHOOK"); v != "" {
 		c.Watch.Webhook = v
+	}
+	if v := os.Getenv("BEIAN2API_NOTIFY_CHANNELS"); v != "" {
+		// 形如 "dingtalk:https://oapi.dingtalk.com/robot/send?access_token=x,wecom:https://..."
+		// 容器里一行配完，不用挂 yaml。
+		c.Notify.Channels = parseNotifyChannels(v)
 	}
 	if v := os.Getenv("BEIAN2API_WATCH_INTERVAL"); v != "" {
 		// 支持 "6h" / "30m" / "86400" 三种写法，容器里配一行就够。
@@ -204,6 +229,22 @@ func (c *Config) Validate() error {
 	if len(c.Providers) == 0 {
 		c.Providers = Default().Providers
 	}
+	if c.Notify.Retries <= 0 {
+		c.Notify.Retries = 3
+	}
+	if c.Notify.Retries > 10 {
+		c.Notify.Retries = 10
+	}
+	for i := range c.Notify.Channels {
+		ch := &c.Notify.Channels[i]
+		if strings.TrimSpace(ch.URL) == "" {
+			return fmt.Errorf("notify.channels[%d] 缺少 url", i)
+		}
+		if !strings.HasPrefix(ch.URL, "http://") && !strings.HasPrefix(ch.URL, "https://") {
+			return fmt.Errorf("notify.channels[%d].url 必须是 http(s) 地址", i)
+		}
+		ch.Kind = strings.ToLower(strings.TrimSpace(ch.Kind))
+	}
 	for i := range c.Providers {
 		if c.Providers[i].Name == "" {
 			return fmt.Errorf("providers[%d] 缺少 name", i)
@@ -223,6 +264,38 @@ func sortProviders(ps []Provider) {
 			ps[j], ps[j-1] = ps[j-1], ps[j]
 		}
 	}
+}
+
+// Channels 返回全部推送通道：显式配置的 notify.channels 优先；
+// 只配了旧的 watch.webhook 时，把它当成一个 generic 通道，老配置继续能用。
+func (c *Config) Channels() []NotifyChannel {
+	var out []NotifyChannel
+	out = append(out, c.Notify.Channels...)
+	if c.Watch.Webhook != "" {
+		for _, ch := range out {
+			if ch.URL == c.Watch.Webhook {
+				return out
+			}
+		}
+		out = append(out, NotifyChannel{Name: "webhook", Kind: "generic", URL: c.Watch.Webhook})
+	}
+	return out
+}
+
+// parseNotifyChannels 解析 "kind:url" 形式的紧凑配置。url 里的冒号不影响切割，
+// 因为只按第一个冒号切，且要求前半段不含 "//"。
+func parseNotifyChannels(v string) []NotifyChannel {
+	var out []NotifyChannel
+	for _, item := range splitList(v) {
+		kind, u, ok := strings.Cut(item, ":")
+		// "https://host/hook" 不带 kind：前缀本身就是 scheme，不能当成通道类型。
+		if !ok || strings.Contains(kind, "/") || kind == "http" || kind == "https" {
+			out = append(out, NotifyChannel{URL: item})
+			continue
+		}
+		out = append(out, NotifyChannel{Kind: kind, URL: u})
+	}
+	return out
 }
 
 // EnabledProviders 返回启用中的上游名字，按权重排序。
