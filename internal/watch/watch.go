@@ -241,6 +241,11 @@ func (w *Watcher) check(ctx context.Context, it store.WatchItem) (Change, bool) 
 	it.CheckedAt = now
 
 	if err != nil {
+		// 整轮巡检被取消（进程退出、超时窗口到点）不是上游的错，
+		// 记成故障会让一个没问题的域名平白多一条「连续失败」。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Change{}, false
+		}
 		return w.onFailure(&it, err, now)
 	}
 	// 回源失败但本地有快照时，service 会返回 stale 结果而不是错误。

@@ -13,14 +13,17 @@ import (
 
 // handleChanges 返回最近记录的备案变更事件。
 func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	// limit 超上限时不能静默改成默认值：调用方写 limit=500 收到 50 条，
+	// 分页逻辑就会以为「只有 50 条」，剩下的永远拉不到。
+	limit, err := parseLimit(r.URL.Query().Get("limit"), 50, 200)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_limit", err.Error())
+		return
 	}
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 
 	var out []watch.Change
-	err := s.svc.Store().ListChanges(limit, func(raw []byte) (bool, error) {
+	err = s.svc.Store().ListChanges(limit, func(raw []byte) (bool, error) {
 		var c watch.Change
 		if json.Unmarshal(raw, &c) != nil {
 			return false, nil
@@ -66,7 +69,14 @@ func (s *Server) handleRSS(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<rss version="2.0"><channel>` + "\n")
 	fmt.Fprintf(&b, "<title>Beian2API 备案变更</title>\n<link>%s</link>\n<description>被监控域名的备案信息变化</description>\n", esc(base))
-	fmt.Fprintf(&b, "<lastBuildDate>%s</lastBuildDate>\n", time.Now().Format(time.RFC1123Z))
+	// lastBuildDate 用最后一条事件的时间，不是 time.Now()。
+	// 每次请求都把「构建时间」刷新成当前时刻，等于告诉阅读器「内容刚变过」，
+	// 于是一个永远不会变的 feed 也会被反复拉取。
+	built := time.Now()
+	if len(items) > 0 {
+		built = time.Unix(items[0].At, 0)
+	}
+	fmt.Fprintf(&b, "<lastBuildDate>%s</lastBuildDate>\n", built.Format(time.RFC1123Z))
 	for _, c := range items {
 		fmt.Fprintf(&b, "<item><title>%s 备案%s</title>\n", esc(c.Domain), esc(kindWord(c.Kind)))
 		fmt.Fprintf(&b, "<link>%s/api/v1/history?domain=%s</link>\n", esc(base), esc(c.Domain))

@@ -99,7 +99,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 // handleHistory 返回某域名的历史快照与变化差异。
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit, err := parseLimit(r.URL.Query().Get("limit"), 0, 500)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_limit", err.Error())
+		return
+	}
 	recs, err := s.svc.History(domain, limit)
 	if err != nil {
 		s.writeServiceErr(w, err)
@@ -270,6 +274,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if total > 0 {
 		rate = float64(hits) * 100 / float64(total)
 	}
+	retainChanges, retainHistory := s.svc.Store().Retention()
 	writeOK(w, map[string]any{
 		"version":    s.version,
 		"uptime_sec": int(time.Since(s.startAt).Seconds()),
@@ -282,6 +287,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"hit_rate":        fmt.Sprintf("%.1f%%", rate),
 		},
 		"data_file": s.svc.Store().Path(),
+		// 存储占用与保留策略：数据文件只增不减的部署，最该被看见的就是这两个数。
+		"storage": map[string]any{
+			"size_bytes":     s.svc.Store().Size(),
+			"retain_changes": retainChanges,
+			"retain_history": retainHistory,
+		},
 	})
 }
 
@@ -332,6 +343,31 @@ func decodeJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
 	return dec.Decode(v)
+}
+
+// parseLimit 解析 limit 参数。
+//
+// 超出上限时直接报错而不是悄悄改小：静默降级会让调用方的分页逻辑
+// 以为「后面没数据了」，比明确拒绝更糟。
+func parseLimit(raw string, def, max int) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("limit 必须是整数，收到 %q", raw)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("limit 不能为负数")
+	}
+	if max > 0 && n > max {
+		return 0, fmt.Errorf("limit 最大 %d，收到 %d", max, n)
+	}
+	if n == 0 {
+		return def, nil
+	}
+	return n, nil
 }
 
 func truthy(s string) bool {

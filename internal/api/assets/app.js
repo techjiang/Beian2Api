@@ -186,7 +186,21 @@
       $('#s-ver').textContent = '版本 ' + s.version;
       $('#s-prov').textContent = (s.providers || []).length + ' 个';
       $('#s-prov').title = (s.providers || []).join(', ');
+      if (s.storage) {
+        $('#s-size').textContent = fmtSize(s.storage.size_bytes);
+        var rc = s.storage.retain_changes;
+        $('#s-retain').textContent = rc > 0 ? '变更保留 ' + num(rc) + ' 条' : '变更不裁剪';
+        $('#s-retain').title = s.storage.retain_history > 0
+          ? '每个域名保留最近 ' + s.storage.retain_history + ' 条历史快照'
+          : '历史快照不裁剪';
+      }
     }).catch(function () {});
+  }
+  function fmtSize(b) {
+    if (!b) return '–';
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1024 / 1024).toFixed(1) + ' MB';
   }
   function fmtDur(s) {
     if (s < 60) return s + ' 秒';

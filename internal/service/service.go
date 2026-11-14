@@ -146,6 +146,12 @@ func (s *Service) query(ctx context.Context, domain string, opts Options) (*mode
 		}
 	}
 
+	// 调用方自己走了（断连、超时）：如实返回 ctx 错误，而不是「上游不可用」。
+	// 后者会让人以为数据源出了问题，实际上是我们不等了。
+	if out.Cancelled {
+		return nil, ctx.Err()
+	}
+
 	detail := "上游数据源均不可用"
 	if len(out.Errors) > 0 {
 		parts := make([]string, 0, len(out.Errors))

@@ -504,3 +504,44 @@ func TestStaleResultTreatedAsFailure(t *testing.T) {
 		t.Fatalf("应记录快照回退原因: %q", item.LastError)
 	}
 }
+
+// ctxStub 只在 ctx 取消时如实返回 ctx 错误，模拟真实适配器的行为。
+type ctxStub struct{}
+
+func (ctxStub) Name() string { return "ctxstub" }
+func (ctxStub) Lookup(ctx context.Context, d string) ([]model.Record, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// 整轮巡检被取消（进程退出、2 分钟窗口到点）不是上游的错。
+// 记成故障会让一个完全正常的域名平白多一条「连续失败」，
+// 甚至把告警推给运维——而实际上什么都没坏。
+func TestCanceledRunNotCountedAsFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := service.New(cfg, st, []provider.Task{{Provider: ctxStub{}, Timeout: 5 * time.Second}}, log)
+	w := New(svc, st, time.Hour, 1, nil, log).WithFailThreshold(1)
+	_ = st.PutWatch(&store.WatchItem{Domain: "example.com"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+	ch := w.RunOnce(ctx)
+	if len(ch) != 0 {
+		t.Fatalf("取消不该产生告警，实际 %+v", ch)
+	}
+	item, _ := st.GetWatch("example.com")
+	if item.FailStreak != 0 || item.LastError != "" {
+		t.Fatalf("取消不该被记成失败: %+v", item)
+	}
+}

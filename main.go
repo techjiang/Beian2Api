@@ -120,6 +120,7 @@ func bootstrap(configPath string) (*config.Config, *store.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	st.WithRetention(cfg.Storage.RetainChanges, cfg.Storage.RetainHistory)
 	return cfg, st, nil
 }
 
@@ -224,6 +225,25 @@ func cmdServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 计数器攒在内存里、定期刷盘；顺带按保留上限裁剪只增数据。
+	// 15 秒一次：丢 15 秒的命中率统计无所谓，而每次请求都 fsync 是真的伤性能。
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if r, err := st.Maintain(); err != nil {
+					log.Warn("存储维护失败", "err", err)
+				} else if r.ChangesTrimmed > 0 || r.HistoryTrimmed > 0 {
+					log.Info("存储裁剪完成", "changes", r.ChangesTrimmed, "history", r.HistoryTrimmed)
+				}
+			}
+		}
+	}()
+
 	if w != nil {
 		w.Start(ctx)
 		log.Info("备案巡检已启动", "interval", cfg.WatchInterval().String(), "workers", cfg.Watch.Workers)
@@ -268,6 +288,10 @@ func cmdServe(args []string) error {
 		case <-time.After(5 * time.Second):
 			log.Warn("仍有推送未完成，已超时退出")
 		}
+	}
+	// 进程退出前把内存里还没刷盘的计数器落下去，否则最后的统计会归零。
+	if _, err := st.Maintain(); err != nil {
+		log.Warn("退出前存储维护失败", "err", err)
 	}
 	log.Info("已退出")
 	return nil

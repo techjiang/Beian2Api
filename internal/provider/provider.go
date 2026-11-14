@@ -115,6 +115,10 @@ type Outcome struct {
 	Source  string
 	// AllFailed 为 true 时表示所有上游都挂了（并非"无备案"）。
 	AllFailed bool
+	// Cancelled 为 true 表示调用方自己走了（客户端断连、请求超时），
+	// 不是因为上游坏了。两者必须分开：混成 AllFailed 会让巡检把
+	// 「浏览器关掉页面」记成一次上游故障，甚至推一条告警出去。
+	Cancelled bool
 	Errors    map[string]string
 }
 
@@ -159,15 +163,21 @@ func Race(ctx context.Context, domain string, tasks []Task) Outcome {
 	// 拿到"无备案"后只再等一小会儿：给快源一个机会，也不让慢源拖死响应。
 	// 5.6s 的等待对使用者是灾难，而多等 800ms 几乎察觉不到。
 	var grace <-chan time.Time
+drain:
 	for i := 0; i < len(tasks); i++ {
 		var r reply
 		select {
 		case <-ctx.Done():
+			// 调用方的 ctx 已经取消：再等下去只是白等——结果没人要，
+			// 而且会被上层当成「上游不可用」，污染巡检对故障的判断。
+			out.Cancelled = true
+			break drain
 		case <-grace:
 			if !decided && notFoundFrom != "" {
 				out.Source, out.Records = notFoundFrom, []model.Record{}
 				decided = true
 			}
+			continue
 		case r = <-ch:
 		}
 		if decided {
@@ -186,7 +196,7 @@ func Race(ctx context.Context, domain string, tasks []Task) Outcome {
 			out.Errors[r.name] = r.err.Error()
 		}
 	}
-	if out.Source == "" {
+	if out.Source == "" && !out.Cancelled {
 		if notFoundFrom != "" {
 			out.Source = notFoundFrom // 上游明确表示无备案
 			out.Records = []model.Record{}

@@ -313,7 +313,7 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 | 参数 | 说明 |
 | --- | --- |
-| limit | 返回条数，默认 50，上限 200 |
+| limit | 返回条数，默认 50，上限 200。超上限返回 400 而不是静默改小——静默降级会让调用方的分页逻辑以为「后面没数据了」 |
 | since | Unix 秒，只返回该时间之后的变更 |
 
 ## GET /api/v1/changes.rss
@@ -436,10 +436,19 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/backup?name=before-upgrade.db"
       "stale_fallbacks": 4,
       "hit_rate": "84.2%"
     },
-    "data_file": "/opt/beian2api/data/beian2api.db"
+    "data_file": "/opt/beian2api/data/beian2api.db",
+    "storage": {
+      "size_bytes": 32768,
+      "retain_changes": 2000,
+      "retain_history": 200
+    }
   }
 }
 ```
+
+`storage` 是数据文件的实际大小与两个滚动保留上限（`0` 表示不裁剪）。
+计数器（命中 / 回源 / 快照回退）在内存里累加、每 15 秒刷盘一次，
+所以这里的数字最多滞后十几秒——用这点新鲜度换掉每次请求一次 fsync，很划算。
 
 ## GET /api/v1/providers
 

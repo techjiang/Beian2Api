@@ -226,3 +226,144 @@ func TestNotifyStateRoundTrip(t *testing.T) {
 		t.Fatalf("清理后应只剩 fs: %+v", got)
 	}
 }
+
+// 计数器只在内存里累加，Flush 才落盘。
+// 每次请求都 fsync 会把微秒级的缓存命中拖到毫秒级，这是快路径上最不该有的开销。
+func TestCountersBufferThenFlush(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.Incr("hits", 1); v != 1 {
+		t.Fatalf("应读到 1，实际 %d", v)
+	}
+	s.Incr("hits", 1)
+	if got := s.Stat("hits"); got != 2 {
+		t.Fatalf("未刷盘也要能读到 2，实际 %d", got)
+	}
+	// 未刷盘时落盘值为 0
+	if n := s.persisted("hits"); n != 0 {
+		t.Fatalf("刷盘前落盘值应为 0，实际 %d", n)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.persisted("hits"); n != 2 {
+		t.Fatalf("刷盘后落盘值应为 2，实际 %d", n)
+	}
+	// 刷盘后继续累加，总数不能丢
+	s.Incr("hits", 3)
+	if got := s.Stat("hits"); got != 5 {
+		t.Fatalf("刷盘后继续累加应为 5，实际 %d", got)
+	}
+	s.Close()
+
+	// 重开验证跨进程持久化：累加值在退出前已被 Maintain 落盘
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got := s2.Stat("hits"); got != 2 {
+		t.Fatalf("重开后应保留已刷盘的 2，实际 %d", got)
+	}
+}
+
+// 变更流水只增不减，跑一年就是一个长个不停的文件，而首页只看最近 10 条。
+func TestTrimChangesKeepsNewest(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 10; i++ {
+		if err := s.AppendChange(fmt.Sprintf("%020d-d%d.com", 1000+i, i), map[string]any{"at": 1000 + i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.TrimChanges(4)
+	if err != nil || n != 6 {
+		t.Fatalf("应删掉 6 条，实际 %d (%v)", n, err)
+	}
+	var kept []int64
+	_ = s.ListChanges(100, func(raw []byte) (bool, error) {
+		var v struct {
+			At int64 `json:"at"`
+		}
+		_ = json.Unmarshal(raw, &v)
+		kept = append(kept, v.At)
+		return true, nil
+	})
+	if len(kept) != 4 || kept[0] != 1009 || kept[3] != 1006 {
+		t.Fatalf("应保留最新的 4 条（倒序 1009..1006），实际 %v", kept)
+	}
+	// 再裁一次不该有变化
+	if n, _ := s.TrimChanges(4); n != 0 {
+		t.Fatalf("已在上限内不该再删，实际删了 %d", n)
+	}
+}
+
+// 历史快照按域名分别裁剪：全局上限会让一个高频域名把别人的历史全挤掉。
+func TestTrimHistoryPerDomain(t *testing.T) {
+	s := open(t)
+	for i := 0; i < 5; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "a.com", ICPCode: "x" + itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.AppendHistory(model.Record{Domain: "b.com", ICPCode: "y" + itoa(int64(i)), FetchedAt: int64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.TrimHistory(3)
+	if err != nil || n != 2 {
+		t.Fatalf("应删掉 2 条 a.com 的旧快照，实际 %d (%v)", n, err)
+	}
+	if h, _ := s.History("a.com", 0); len(h) != 3 {
+		t.Fatalf("a.com 应剩 3 条，实际 %d", len(h))
+	}
+	if h, _ := s.History("b.com", 0); len(h) != 2 {
+		t.Fatalf("b.com 不该被动过，实际 %d", len(h))
+	}
+	// 剩下的必须是最新的三条
+	h, _ := s.History("a.com", 0)
+	if h[0].ICPCode != "x2" || h[2].ICPCode != "x4" {
+		t.Fatalf("应保留最新的 x2..x4，实际 %+v", h)
+	}
+}
+
+// 上限设成 0 表示不裁剪：有人就是想自己接管，不能把他的数据删了。
+func TestTrimDisabledByZero(t *testing.T) {
+	s := open(t).WithRetention(0, 0)
+	for i := 0; i < 5; i++ {
+		_ = s.AppendChange(fmt.Sprintf("%020d-d%d.com", i, i), map[string]any{"at": i})
+		_ = s.AppendHistory(model.Record{Domain: "a.com", ICPCode: itoa(int64(i)), FetchedAt: int64(i)})
+	}
+	r, err := s.Maintain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ChangesTrimmed != 0 || r.HistoryTrimmed != 0 {
+		t.Fatalf("上限为 0 时不该裁剪，实际 %+v", r)
+	}
+	if c, _ := s.Count(); c.Changes != 5 || c.History != 5 {
+		t.Fatalf("数据不该被动过: %+v", c)
+	}
+}
+
+func TestMaintainTrimsAndFlushes(t *testing.T) {
+	s := open(t).WithRetention(3, 2)
+	for i := 0; i < 6; i++ {
+		_ = s.AppendChange(fmt.Sprintf("%020d-d%d.com", i, i), map[string]any{"at": i})
+		_ = s.AppendHistory(model.Record{Domain: "a.com", ICPCode: itoa(int64(i)), FetchedAt: int64(i)})
+	}
+	s.Incr("hits", 7)
+	r, err := s.Maintain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ChangesTrimmed != 3 || r.HistoryTrimmed != 4 {
+		t.Fatalf("裁剪数量不对: %+v", r)
+	}
+	if n := s.persisted("hits"); n != 7 {
+		t.Fatalf("Maintain 应顺带刷盘计数器，实际落盘 %d", n)
+	}
+}

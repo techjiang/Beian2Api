@@ -242,3 +242,31 @@ func TestTrustProxyDefaultOff(t *testing.T) {
 		t.Fatal("默认不该信任 X-Forwarded-For")
 	}
 }
+
+func TestStorageRetentionDefaultsAndEnv(t *testing.T) {
+	c := Default()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Storage.RetainChanges != 2000 || c.Storage.RetainHistory != 200 {
+		t.Fatalf("默认保留上限不对: %+v", c.Storage)
+	}
+
+	t.Setenv("BEIAN2API_RETAIN_CHANGES", "100")
+	t.Setenv("BEIAN2API_RETAIN_HISTORY", "0") // 0 = 不裁剪，是合法值
+	c2, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Storage.RetainChanges != 100 || c2.Storage.RetainHistory != 0 {
+		t.Fatalf("环境变量覆盖失效: %+v", c2.Storage)
+	}
+}
+
+func TestStorageRetentionRejectsNegative(t *testing.T) {
+	c := Default()
+	c.Storage.RetainChanges = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("负数应被拒绝")
+	}
+}

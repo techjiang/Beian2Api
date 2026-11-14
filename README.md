@@ -251,6 +251,8 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_WATCH_ENABLED` | `true` | 是否启用自动巡检 |
 | `BEIAN2API_WATCH_FAIL_THRESHOLD` | `3` | 连续几轮查不到才推送「上游异常」 |
 | `BEIAN2API_TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` / `X-Real-IP` |
+| `BEIAN2API_RETAIN_CHANGES` | `2000` | 变更流水保留条数，0 表示不裁剪 |
+| `BEIAN2API_RETAIN_HISTORY` | `200` | 每个域名保留的历史快照条数，0 表示不裁剪 |
 
 ### 反向代理
 
@@ -269,6 +271,10 @@ trust_proxy: true
 ### 数据与备份
 
 **所有数据都在一个文件里**：`data/beian2api.db`。缓存、历史快照、监控列表、变更记录全在里面。
+
+变更流水和历史快照是只增的数据，所以默认带滚动保留（`storage.retain_changes: 2000`、
+`storage.retain_history: 200` 按域名分别算，设 0 关闭裁剪）。数据文件的实际大小和这两个
+上限都会在 `/api/v1/stats` 的 `storage` 字段里，首页「服务状态」也直接显示。
 
 数据库用排他文件锁，所以**服务运行时外部进程打不开它**。为此提供了在线备份接口：
 

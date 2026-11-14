@@ -488,3 +488,49 @@ func TestAdminBackupRejectsForwardedWithoutTrustProxy(t *testing.T) {
 		t.Fatalf("未信任代理时应拒绝，实际 %d %s", resp.StatusCode, body)
 	}
 }
+
+// limit 超上限必须报错，不能静默改成默认值：
+// 调用方写 limit=500 收到 50 条，分页逻辑会以为「后面没有了」。
+func TestChangesLimitOverMaxRejected(t *testing.T) {
+	_, h := mkServer(t, nil)
+	resp, body := get(t, h, "/api/v1/changes?limit=500", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("应返回 400，实际 %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "invalid_limit") || !strings.Contains(body, "200") {
+		t.Fatalf("应说明上限是 200: %s", body)
+	}
+	// 合法的边界值要能用
+	if resp, _ := get(t, h, "/api/v1/changes?limit=200", nil); resp.StatusCode != 200 {
+		t.Fatalf("limit=200 应可用，实际 %d", resp.StatusCode)
+	}
+	// 非数字也拒绝
+	if resp, _ := get(t, h, "/api/v1/changes?limit=abc", nil); resp.StatusCode != 400 {
+		t.Fatalf("非法 limit 应返回 400，实际 %d", resp.StatusCode)
+	}
+}
+
+// RSS 的 lastBuildDate 用最后一条事件时间，不是请求时刻。
+// 每次请求都刷新成「现在」，等于告诉阅读器「内容刚变过」，feed 会被反复拉取。
+func TestRSSLastBuildDateIsLastEvent(t *testing.T) {
+	s, h := mkServer(t, nil)
+	at := int64(1700000000)
+	_ = s.svc.Store().AppendChange("0001", map[string]any{"domain": "a.com", "at": at})
+	_, rss := get(t, h, "/api/v1/changes.rss", nil)
+	want := time.Unix(at, 0).Format(time.RFC1123Z)
+	if !strings.Contains(rss, "<lastBuildDate>"+want+"</lastBuildDate>") {
+		t.Fatalf("lastBuildDate 应为 %s，实际:\n%s", want, rss)
+	}
+}
+
+func TestStatsExposeStorage(t *testing.T) {
+	s, h := mkServer(t, nil)
+	s.svc.Store().WithRetention(1234, 56)
+	_, body := get(t, h, "/api/v1/stats", nil)
+	if !strings.Contains(body, `"retain_changes":1234`) || !strings.Contains(body, `"retain_history":56`) {
+		t.Fatalf("stats 应暴露保留策略: %s", body)
+	}
+	if !strings.Contains(body, `"size_bytes"`) {
+		t.Fatalf("stats 应暴露数据文件大小: %s", body)
+	}
+}

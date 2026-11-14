@@ -64,6 +64,16 @@ type Config struct {
 
 	Notify Notify `yaml:"notify" json:"notify"`
 
+	// Storage 控制只增数据（变更流水、历史快照）的滚动保留上限。
+	//
+	// 为什么要配这个：这两个 bucket 只增不删，监控域名多、变更频繁的部署
+	// 跑上一年，数据文件会一直长大，而首页永远只显示最近 10 条。
+	// 上限设成 0 表示不裁剪（自己接管风险）。
+	Storage struct {
+		RetainChanges int `yaml:"retain_changes" json:"retain_changes"`
+		RetainHistory int `yaml:"retain_history" json:"retain_history"`
+	} `yaml:"storage" json:"storage"`
+
 	CORS []string `yaml:"cors" json:"cors"`
 }
 
@@ -104,6 +114,8 @@ func Default() *Config {
 	c.Watch.Workers = 4
 	c.Watch.FailThreshold = 3
 	c.Notify.Retries = 3
+	c.Storage.RetainChanges = 2000
+	c.Storage.RetainHistory = 200
 	c.Providers = []Provider{
 		{Name: "miit", Enabled: true, Weight: 100, Timeout: 8},
 		{Name: "apihz", Enabled: true, Weight: 40, Timeout: 8},
@@ -184,6 +196,16 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("BEIAN2API_WATCH_ENABLED"); v != "" {
 		c.Watch.Enabled = v == "1" || strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("BEIAN2API_RETAIN_CHANGES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Storage.RetainChanges = n
+		}
+	}
+	if v := os.Getenv("BEIAN2API_RETAIN_HISTORY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Storage.RetainHistory = n
+		}
 	}
 	if v := os.Getenv("BEIAN2API_TTL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -299,6 +321,9 @@ func (c *Config) Validate() error {
 			}
 			ch.Events[j] = e
 		}
+	}
+	if c.Storage.RetainChanges < 0 || c.Storage.RetainHistory < 0 {
+		return fmt.Errorf("storage.retain_changes / retain_history 不能为负数")
 	}
 	for i := range c.Providers {
 		if c.Providers[i].Name == "" {
