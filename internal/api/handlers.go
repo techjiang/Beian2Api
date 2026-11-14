@@ -171,9 +171,19 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 		now := model.Now()
 		item := &store.WatchItem{Domain: d, AddedAt: now, CheckedAt: now}
-		if hist, _ := s.svc.History(d, 1); len(hist) > 0 {
-			item.LastFP = hist[len(hist)-1].Fingerprint()
-			item.LastICP = hist[len(hist)-1].ICPCode
+		// 重复添加时保留已有的基线、计数与加入时间，只刷新抓取时间，
+		// 否则用户手滑点两次就把变更计数清零了。
+		if old, err := s.svc.Store().GetWatch(d); err == nil {
+			item.AddedAt = old.AddedAt
+			item.Changes = old.Changes
+			item.LastFP = old.LastFP
+			item.LastICP = old.LastICP
+		}
+		if item.LastFP == "" {
+			if hist, _ := s.svc.History(d, 1); len(hist) > 0 {
+				item.LastFP = hist[len(hist)-1].Fingerprint()
+				item.LastICP = hist[len(hist)-1].ICPCode
+			}
 		}
 		if err := s.svc.Store().PutWatch(item); err != nil {
 			writeErr(w, http.StatusInternalServerError, "store_error", err.Error())

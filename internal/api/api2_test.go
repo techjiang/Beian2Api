@@ -203,3 +203,41 @@ func TestAdminBackupWithKey(t *testing.T) {
 		t.Fatalf("带正确 Key 应允许，实际 %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestWatchReAddKeepsProgress(t *testing.T) {
+	s, h := mkServer(t, nil)
+	post := func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/watch", strings.NewReader(`{"domain":"example.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("加入监控失败 %d: %s", w.Code, w.Body.String())
+		}
+	}
+	post()
+	// 模拟巡检已经记录过一次变更
+	item, err := s.svc.Store().GetWatch("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addedAt := item.AddedAt
+	item.Changes = 3
+	if err := s.svc.Store().PutWatch(item); err != nil {
+		t.Fatal(err)
+	}
+	post() // 重复添加
+	again, err := s.svc.Store().GetWatch("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Changes != 3 {
+		t.Fatalf("重复添加不应清零变更计数，实际 %d", again.Changes)
+	}
+	if again.AddedAt != addedAt {
+		t.Fatal("重复添加不应改写首次加入时间")
+	}
+	if again.LastFP == "" {
+		t.Fatal("基线指纹应被保留")
+	}
+}
