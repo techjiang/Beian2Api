@@ -97,8 +97,8 @@ func cmdExport(args []string) error {
 		return err
 	}
 	fmt.Printf("✔ 已导出到 %s\n", *out)
-	fmt.Printf("  缓存 %d 条 · 历史 %d 条 · 监控 %d 个 · 变更 %d 条 · 推送通道 %d 个\n",
-		len(d.Cache), len(d.History), len(d.Watch), len(d.Changes), len(d.Notify))
+	fmt.Printf("  缓存 %d 条 · 历史 %d 条 · 监控 %d 个 · 变更 %d 条 · 推送通道 %d 个 · 趋势 %d 小时\n",
+		len(d.Cache), len(d.History), len(d.Watch), len(d.Changes), len(d.Notify), len(d.Series))
 	return nil
 }
 
@@ -130,8 +130,8 @@ func cmdImport(args []string) error {
 		return err
 	}
 	fmt.Printf("✔ 已导入\n")
-	fmt.Printf("  缓存 %d 条 · 历史 %d 条 · 监控 %d 个 · 变更 %d 条 · 推送通道 %d 个\n",
-		len(d.Cache), len(d.History), len(d.Watch), len(d.Changes), len(d.Notify))
+	fmt.Printf("  缓存 %d 条 · 历史 %d 条 · 监控 %d 个 · 变更 %d 条 · 推送通道 %d 个 · 趋势 %d 小时\n",
+		len(d.Cache), len(d.History), len(d.Watch), len(d.Changes), len(d.Notify), len(d.Series))
 	return nil
 }
 

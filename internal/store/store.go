@@ -1150,10 +1150,23 @@ type Dump struct {
 	Changes    []json.RawMessage `json:"changes"`
 	Notify     []notify.State    `json:"notify"`
 	Counters   map[string]int64  `json:"counters"`
+	// Series 是最近 7 天的小时聚合（最多 168 条，约 20KB）。
+	//
+	// 它原来不在导出里，理由是「那是观测记录，不是业务数据」。但对搬完机器
+	// 的人来说，后台那张趋势图是他的实例唯一的「历史上忙不忙」——
+	// 而这张图正好是唯一一个从零开始的：迁移完打开后台，页面上写着
+	// 「还没有数据。这个序列按小时聚合，跑满一小时就会出现第一段」，
+	// 看起来像功能坏了，其实是这份文件里本来就没有这一段。
+	// 20KB 换一张迁移后仍然连续的图，值。
+	Series []SeriesPoint `json:"series"`
 }
 
 // DumpVersion 是当前导出格式版本。
-const DumpVersion = 2
+//
+//	v1：只有 items（缓存）
+//	v2：缓存 + 历史 + 监控 + 变更 + 推送状态 + 计数器
+//	v3：在 v2 之上补上小时序列（series）
+const DumpVersion = 3
 
 // Dump 在同一个读事务里取出全部数据，保证导出的是某一时刻的一致快照。
 func (s *Store) Dump() (*Dump, error) {
@@ -1196,6 +1209,20 @@ func (s *Store) Dump() (*Dump, error) {
 			var st notify.State
 			if json.Unmarshal(v, &st) == nil {
 				d.Notify = append(d.Notify, st)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketSeries).ForEach(func(k, v []byte) error {
+			var pt SeriesPoint
+			if json.Unmarshal(v, &pt) == nil {
+				// key 是权威的小时值：value 里的 hour 字段来自写入那一刻，
+				// 正常情况下两个一致，但重建 key 必须照着 key 来。
+				if h, perr := strconv.ParseInt(string(k), 10, 64); perr == nil {
+					pt.Hour = h
+				}
+				d.Series = append(d.Series, pt)
 			}
 			return nil
 		}); err != nil {
@@ -1300,6 +1327,49 @@ func (s *Store) Restore(d *Dump) error {
 			}
 			if err := states.Put([]byte(st.Name), buf); err != nil {
 				return err
+			}
+		}
+		// 小时序列按 key upsert 合并：同一小时在两个库里都有时，
+		// 取「较大值」而不是后写的覆盖前面。
+		//
+		// 合并方向有依据：命中/回源/变更都是只增的计数，而这份数据是
+		// 两台机器各自独立观测到的同一小时——把增量大的那台覆盖掉，
+		// 等于凭空抹掉了一段真实流量。gauge（cache）取后写的那个即可，
+		// 它本来就是「那小时的最后一个观测值」。
+		if len(d.Series) > 0 {
+			sb := tx.Bucket(bucketSeries)
+			for _, pt := range d.Series {
+				if pt.Hour <= 0 {
+					continue
+				}
+				key := seriesKey(pt.Hour)
+				if cur := sb.Get(key); cur != nil {
+					var old SeriesPoint
+					if json.Unmarshal(cur, &old) == nil {
+						if old.Hits > pt.Hits {
+							pt.Hits = old.Hits
+						}
+						if old.Misses > pt.Misses {
+							pt.Misses = old.Misses
+						}
+						if old.Stale > pt.Stale {
+							pt.Stale = old.Stale
+						}
+						if old.Changes > pt.Changes {
+							pt.Changes = old.Changes
+						}
+						if pt.Cache == 0 {
+							pt.Cache = old.Cache
+						}
+					}
+				}
+				buf, err := json.Marshal(pt)
+				if err != nil {
+					continue
+				}
+				if err := sb.Put(key, buf); err != nil {
+					return err
+				}
 			}
 		}
 		meta := tx.Bucket(bucketMeta)

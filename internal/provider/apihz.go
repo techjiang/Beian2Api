@@ -97,8 +97,24 @@ func (a *APIHZ) Lookup(ctx context.Context, domain string) ([]model.Record, erro
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, fmt.Errorf("%w: 响应非 JSON", ErrUpstream)
 	}
+	// 400 不等于「没有备案」。
+	//
+	// 这个上游把所有失败都塞进同一个 400，用 msg 区分原因。实测至少三种：
+	//
+	//	400 查询失败或没有备案。      ← 真的没备案
+	//	400 id参数异常，请检查。      ← 凭据写错了
+	//	400 通讯秘钥不正确！          ← 凭据写错了
+	//	400 失败，请重试！            ← 上游自己抖了
+	//
+	// 之前一律当 ErrNotFound，后果不是「查不到」而是「查到了，没备案」：
+	// 结果会带着 10 分钟的负缓存，而巡检会把它读成「备案被注销了」，
+	// 往钉钉/飞书群里推一条 revoked 告警。凭据填错一次，监控里所有域名
+	// 会同时被判成注销——一条假警报比十条「查询失败」危险得多。
 	if r.Code == 400 {
-		return nil, ErrNotFound
+		if apihzNotFound(r.Msg) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("%w: code=400 %s", ErrUpstream, r.Msg)
 	}
 	if r.Code != 200 {
 		return nil, fmt.Errorf("%w: code=%d %s", ErrUpstream, r.Code, r.Msg)
@@ -125,6 +141,22 @@ func (a *APIHZ) Lookup(ctx context.Context, domain string) ([]model.Record, erro
 	}
 	rec.Normalize()
 	return []model.Record{rec}, nil
+}
+
+// apihzNotFound 判断上游的 400 到底是「没有备案」还是「这次请求本身有问题」。
+//
+// 判据只认上游明确说出「查不到」的那几种措辞。不认识的一律当上游错误：
+// 猜错方向的代价不对称——把「凭据错」当成「没备案」会让监控误报注销，
+// 而把「没备案」当成上游错误，最多是多回源一次。
+func apihzNotFound(msg string) bool {
+	// 不把「查询失败」也算进去：上游抖动时回的正是「失败，请重试！」，
+	// 而真正的「没备案」那句话里已经带着「没有备案」。
+	for _, kw := range []string{"没有备案", "未备案", "无备案", "无数据", "未查询", "没有找到"} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 var _ Provider = (*APIHZ)(nil)

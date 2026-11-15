@@ -336,11 +336,19 @@ curl -X POST "http://localhost:8080/api/v1/watch" \
 
 同样支持 `limit` / `offset`（`limit` 留空表示全量，上限 5000），`total` 始终是监控总数。
 
+`enabled` / `interval` 与 `/api/v1/watch/status` **必须说同一个数**。巡检关掉
+（`watch.enabled: false`）时两边都是 `enabled: false` + `interval: 0`；
+这里曾经回配置里那个 `86400`，于是从 `list` 读到的结论是「每 24 小时巡检一轮」，
+实际上一次都不会跑。同一个问题在两个接口上有两种答案，先被读到的那个就成了
+新的真相。补 `enabled` 是因为光把 `interval` 改成 0 而不说原因，读的人会以为
+「间隔没配」。
+
 ```json
 {
   "ok": true,
   "data": {
     "total": 1,
+    "enabled": true,
     "interval": 86400,
     "items": [{
       "domain": "example.com",
@@ -916,6 +924,11 @@ curl -X DELETE "http://127.0.0.1:8080/api/v1/admin/backups"
 
 `custom_credential` 目前只对 apihz 有意义：它为 `false` 时用的就是公共测试凭据，
 被限流时不会报错，只表现为「偶尔查不到」。
+
+凭据写错时 apihz 回的是 `code=400 id参数异常` / `通讯秘钥不正确！` 这类**同一个
+400 状态码**，并不代表「没有备案」。系统按 `msg` 区分：只有明确说出「没有备案」
+的才当成 `found: false`，其余按上游错误处理（查询回 502，巡检记故障而不是
+推一条注销告警）。把「凭据错」当成「没备案」会让监控里所有域名同时被判成注销。
 
 权重会实际影响竞速：权重最高的源立刻出发，其余按权重差按比例延后起跑
 （最多 200ms）。这是对冲而不是排队——高权重源慢了或者挂了，低权重源照样接手，

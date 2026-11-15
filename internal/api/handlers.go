@@ -309,7 +309,24 @@ func (s *Server) handleWatchList(w http.ResponseWriter, r *http.Request) {
 		items = []store.WatchItem{}
 	}
 	total, _ := s.svc.Store().CountWatch()
-	writeOK(w, map[string]any{"total": total, "items": items, "interval": s.cfg.Watch.Interval})
+	// interval 要和 /api/v1/watch/status 说同一个数。
+	//
+	// 巡检关掉（watch.enabled=false）时，status 老实回 interval=0，
+	// 而这里回的是配置里那个 86400——客户端从 list 读到的结论是
+	// 「每 24 小时巡检一轮」，实际上一次都不会跑。同一个问题在两个接口上
+	// 有两种答案，先被读到的那个就成了新的真相。
+	//
+	// enabled 字段也是为这件事补的：光把 interval 改成 0 而不说原因，
+	// 读的人会以为「间隔没配」，而真正的原因是这个功能被关掉了。
+	enabled := s.cfg.Watch.Enabled
+	interval := s.cfg.Watch.Interval
+	if !enabled {
+		interval = 0
+	}
+	writeOK(w, map[string]any{
+		"total": total, "items": items,
+		"enabled": enabled, "interval": interval,
+	})
 }
 
 // handleWatchRun 立即触发一轮巡检。
