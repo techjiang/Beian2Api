@@ -1,7 +1,8 @@
 services:
   beian2api:
-    image: cnb.cool/asoe/techsauce/beian2api:latest
-    # 想自己构建就把上面一行换成 build: ..
+    image: beian2api:latest
+    # 没有现成镜像时直接在本目录下 `docker compose up -d --build` 就地构建
+    build: ..
     container_name: beian2api
     restart: unless-stopped
     ports:

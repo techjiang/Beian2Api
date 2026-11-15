@@ -1,6 +1,6 @@
 [Unit]
 Description=Beian2API - ICP 备案查询接口
-Documentation=https://cnb.cool/asoe/TechSauce/Beian2Api
+Documentation=https://github.com/techjiang/Beian2Api
 After=network-online.target
 Wants=network-online.target
 

@@ -8,7 +8,7 @@
 
 多源竞速 · 本地快照 · 备案号校验 · 变更巡检
 
-[文档](docs/API.md) · [部署](#部署) · [配置](#配置)
+[文档](docs/API.md) · [部署](#部署) · [配置](#配置) · [下载](https://github.com/techjiang/Beian2Api/releases)
 
 </div>
 
@@ -34,10 +34,19 @@
 
 ### 方式一：下载二进制
 
+从 [Releases](https://github.com/techjiang/Beian2Api/releases) 下载对应平台的文件，六个平台
+（linux/darwin/windows × amd64/arm64，另有 linux armv6），附 `SHA256SUMS` 可校验：
+
 ```bash
-# 从 Release 下载对应平台的文件后
-chmod +x beian2api_linux_amd64
-./beian2api_linux_amd64 serve
+# 以 linux amd64 为例
+chmod +x beian2api_1.17.0_linux_amd64
+./beian2api_1.17.0_linux_amd64 serve
+```
+
+想先确认下载有没有损坏：
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
 ```
 
 打开 <http://localhost:8080> 就是查询台。
@@ -45,7 +54,7 @@ chmod +x beian2api_linux_amd64
 ### 方式二：自己编译
 
 ```bash
-git clone https://cnb.cool/asoe/TechSauce/Beian2Api.git
+git clone https://github.com/techjiang/Beian2Api.git
 cd Beian2Api
 make build        # 产物在 bin/beian2api
 make test         # 跑一遍单元测试
@@ -56,9 +65,12 @@ make test         # 跑一遍单元测试
 ### 方式三：Docker
 
 ```bash
+git clone https://github.com/techjiang/Beian2Api.git
+cd Beian2Api
+docker build -t beian2api .
 docker run -d --name beian2api -p 127.0.0.1:8080:8080 \
   -v $(pwd)/data:/data \
-  cnb.cool/asoe/techsauce/beian2api:latest
+  beian2api
 ```
 
 或者用 Compose（已含健康检查与日志轮转）：
@@ -66,6 +78,8 @@ docker run -d --name beian2api -p 127.0.0.1:8080:8080 \
 ```bash
 cd deploy && docker compose up -d
 ```
+
+镜像基于 `alpine`，非 root 运行（uid 10001），数据全在 `/data` 一个卷里。
 
 ### 方式四：systemd
 
@@ -537,6 +551,20 @@ make lint     # gofmt + vet + test
 ```
 
 测试覆盖域名归一化、备案号解析、多源竞速语义、缓存与负缓存、陈旧回退、巡检变更检测、鉴权限流、徽章 XSS 转义等关键路径。
+
+## 关于作者
+
+**科技酱** · 同一个世界，同一个互联网！
+
+| | |
+| --- | --- |
+| 主页 | <https://www.asoe.cn> |
+| 技术博客 | <https://docs.asoe.cn> |
+| GitHub | <https://github.com/techjiang/> |
+| 哔哩哔哩 | <https://space.bilibili.com/1768832152> |
+| 玲珑论坛 | <https://forums.asoe.cn/> |
+| 邮箱 | <official@tech.asoe.cn> |
+| QQ 群 | 291974598 · 474819022 · 631167288 |
 
 ## 许可
 
