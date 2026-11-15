@@ -42,7 +42,7 @@ func (s *Server) mountStatic(mux *http.ServeMux) {
 		return
 	}
 	fileServer := http.FileServer(http.FS(sub))
-	mux.Handle("/assets/", cacheHeader(http.StripPrefix("/assets/", fileServer)))
+	mux.Handle("/assets/", cacheHeader(noRawTemplates(http.StripPrefix("/assets/", fileServer))))
 
 	indexRaw, _ := fs.ReadFile(sub, "index.html")
 	adminRaw, _ := fs.ReadFile(sub, "admin.html")
@@ -66,24 +66,22 @@ func (s *Server) mountStatic(mux *http.ServeMux) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=60")
-		_, _ = w.Write(withVersion(indexRaw))
+		servePage(w, r, indexRaw)
 	})
 	// 后台页面本身是静态的，数据全靠 /api/v1/admin/* 鉴权。
 	//
 	// 为什么页面不做成「配了 Key 才返回」：页面里没有任何数据，
 	// 拦它只会让人打不开自己的后台、也看不到那句「需要 API Key」的提示。
 	// 真正的门在后面每个接口上——那才是数据所在的地方。
-	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=60")
-		_, _ = w.Write(withVersion(adminRaw))
-	})
-	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(withVersion(docsRaw))
-	})
+	// 页面类路由只认 GET / HEAD。
+	//
+	// 之前这三个页面用裸 HandleFunc —— `POST /`、`DELETE /admin`、`PUT /docs`
+	// 一律回 200 和整页 HTML。接口层早就把方法检查做全了（DELETE /api/v1/stats
+	// 回 405），页面层却是例外。对这种访问者来说，"200 加一整页内容"就是
+	// 一句"你做成了"，而它什么都没做成——一个把 `POST /` 当成"提交查询"的
+	// 脚本会永远看到成功。
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) { servePage(w, r, adminRaw) })
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) { servePage(w, r, docsRaw) })
 	mux.HandleFunc("/logo.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
@@ -97,6 +95,44 @@ func (s *Server) mountStatic(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = w.Write(icon)
+	})
+}
+
+// servePage 输出一个页面模板，并把方法限制在 GET / HEAD。
+//
+// 之前这三个页面用裸 HandleFunc —— `POST /`、`DELETE /admin`、`PUT /docs`
+// 一律回 200 和整页 HTML。接口层早就把方法检查做全了（DELETE /api/v1/stats
+// 回 405），页面层却是例外。对这种访问者来说，「200 加一整页内容」就是一句
+// 「你做成了」，而它什么都没做成。
+func servePage(w http.ResponseWriter, r *http.Request, body []byte) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 GET / HEAD")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	_, _ = w.Write(withVersion(body))
+}
+
+// noRawTemplates 挡住 /assets 下直接访问 .html。
+//
+// 三个页面（index / admin / docs）是**模板**：里面的 __ASSET_VERSION__
+// 要在服务端替换成资源指纹才成立。它们只该从 `/`、`/admin`、`/docs` 出去。
+// 直接访问 /assets/index.html 拿到的是未替换的原文，浏览器会去请求
+// /assets/style.css?v=__ASSET_VERSION__——一个永远不存在的版本号。
+// 更要紧的是 /assets/ 会列出目录索引，把这三份模板（以及它们的内部注释）
+// 摊给任何路过的人看。静态资源目录只该出 css / js / 图标。
+func noRawTemplates(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 目录请求（以 / 结尾）也挡：http.FileServer 对目录会自己去找
+		// index.html，于是 `/assets/` 就把首页模板原样吐出来了——
+		// 同样带着没替换的占位符，同样把内部注释摊给路过的人。
+		if strings.HasSuffix(r.URL.Path, ".html") || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

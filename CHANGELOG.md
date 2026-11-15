@@ -1,5 +1,53 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.17.0] - 2026-11-15
+
+定版轮。三个问题都属于同一类：**你配了、你传了，它没生效，而且不告诉你。**
+这类错最难发现——服务不报错、界面不异常、日志一片正常。
+
+### 修复
+
+- **`BEIAN2API_TTL=6h` 被静默忽略**。配置文件里的时长早就能写 `6h` / `10m` / `7d`
+  （第十六轮修的），环境变量这条路却是另一套解析：走 `strconv.Atoi`，`6h` 解析
+  失败后被**静默吞掉**。于是 `BEIAN2API_TTL=1h` 和完全没设一模一样——缓存 TTL
+  停在默认的 6 小时，而 `beian2api config` 打出来的值看起来"一切正常"。
+  容器部署里最容易踩：改一行、重启、没有任何报错，就是没变。
+  现在 `TTL` / `NEGATIVE_TTL` / `STALE_MAX` / `WATCH_INTERVAL` /
+  `RETAIN_*` / `WATCH_FAIL_THRESHOLD` 全部走同一套解析，坏值直接拒绝启动，
+  并且**一次报全**所有写错的变量（改一个、重启、再看下一个太费事）。
+  顺带补上 `BEIAN2API_NEGATIVE_TTL` 与 `BEIAN2API_STALE_MAX`——这两个以前
+  根本没有环境变量入口。
+- **`POST /api/v1/query?refresh=1` 不生效**。文档的参数表写的是「位置：
+  query / body」，而 POST 分支完全不读 URL：`refresh` 静默失效（调用方以为在
+  强制回源，实际拿到缓存里那份旧数据），`?refresh=abc` 连 400 都不给——
+  同一批接口里 GET 会 400，只因为换了请求方法就成了例外。
+  `/api/v1/batch` 同理。现在两处都认 URL，都校验 `refresh`，两处都给时以
+  body 为准（老调用方只传 body 时行为不变）。
+- **`POST /`、`DELETE /admin`、`PUT /docs` 回 200 和整页 HTML**。接口层早把
+  方法检查做全了（`DELETE /api/v1/stats` 回 405），页面层是唯一的例外。
+  对一个把 `POST /` 当"提交"的脚本来说，「200 加一整页内容」就是"你做成了"，
+  而它什么都没做成。现在页面路由只认 GET / HEAD，其余 405 + `Allow` 头。
+- **`/assets/index.html` 直接暴露页面模板**。三个页面是模板，
+  `__ASSET_VERSION__` 要在服务端替换才成立。直接访问 `/assets/index.html`
+  拿到的是未替换的原文，浏览器会去请求 `style.css?v=__ASSET_VERSION__`
+  这个永远不存在的版本；而 `/assets/` 会列出目录索引，把三份模板连同内部
+  注释一起摊开。静态资源目录现在只出 css / js / 图标。
+
+### 验证
+
+- `go test -race ./...` 十个包全绿；`gofmt -l .` 干净，`go vet ./...` 通过
+- 新增 16 条回归用例，其中带对照的：
+  - `BEIAN2API_TTL=1h` 修复前输出 `21600`（等于没设），修复后 `3600`
+  - `BEIAN2API_TTL=6hours` 修复前退出码 0，修复后退出码 1 并指出变量名
+  - `POST /api/v1/query?refresh=1` 修复前 `"cached":true`，修复后 `false`
+  - `POST /` 修复前 200 + 整页，修复后 405 + `Allow: GET, HEAD`
+  - `/assets/index.html` 修复前 200 且含 `__ASSET_VERSION__`，修复后 404
+- 端到端手验：起服务后逐个方法打页面路由；`/assets/` 与 `.html` 全 404，
+  `style.css` / `app.js` / `logo.svg` 照常 200；首页指纹仍是 `?v=` 带值且能加载
+- 文档同步：README 环境变量表补齐三项 + 说明环境变量与配置文件同一套时长写法；
+  `docs/API.md` 的 query / batch 参数表写清「两处都认、body 优先」；
+  `config.example.yaml` 加一句环境变量同样认带单位写法
+
 ## [1.16.0] - 2026-11-15
 
 这轮三个问题都不是「报错」，而是**报得对、但结论是假的**：凭据写错会被读成

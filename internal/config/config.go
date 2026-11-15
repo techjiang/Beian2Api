@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,6 +150,12 @@ type Config struct {
 	} `yaml:"storage" json:"storage"`
 
 	CORS []string `yaml:"cors" json:"cors"`
+
+	// envErrs 收集「环境变量写了但用不了」的错误，由 Validate 统一抛出。
+	//
+	// 收集而不是立刻返回，是因为人往往一次改好几个环境变量：
+	// 一次报全部，比改一个、重启、再看到下一个好得多。
+	envErrs []error
 }
 
 // NotifyChannel 是一个推送通道配置。
@@ -271,14 +278,19 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("BEIAN2API_WATCH_INTERVAL"); v != "" {
 		// 支持 "6h" / "30m" / "86400" 三种写法，容器里配一行就够。
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Watch.Interval = Seconds(n)
-		} else if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			c.Watch.Interval = Seconds(d / time.Second)
+		// 写错必须报错，不能静默退回默认值——见 envSeconds 的说明。
+		if sec, err := parseSecondsLoose(v); err != nil {
+			c.envErr("BEIAN2API_WATCH_INTERVAL", v, "写整数秒（86400）或带单位（30m、6h、7d）")
+		} else if sec <= 0 {
+			c.envErr("BEIAN2API_WATCH_INTERVAL", v, "必须大于 0")
+		} else {
+			c.Watch.Interval = sec
 		}
 	}
 	if v := os.Getenv("BEIAN2API_WATCH_FAIL_THRESHOLD"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err != nil || n <= 0 {
+			c.envErr("BEIAN2API_WATCH_FAIL_THRESHOLD", v, "必须是正整数")
+		} else {
 			c.Watch.FailThreshold = n
 		}
 	}
@@ -289,25 +301,77 @@ func (c *Config) applyEnv() {
 		c.Watch.Enabled = truthyEnv(v)
 	}
 	if v := os.Getenv("BEIAN2API_RETAIN_CHANGES"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		if n, err := strconv.Atoi(v); err != nil || n < 0 {
+			c.envErr("BEIAN2API_RETAIN_CHANGES", v, "必须是非负整数（0 表示不裁剪）")
+		} else {
 			c.Storage.RetainChanges = n
 		}
 	}
 	if v := os.Getenv("BEIAN2API_RETAIN_HISTORY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		if n, err := strconv.Atoi(v); err != nil || n < 0 {
+			c.envErr("BEIAN2API_RETAIN_HISTORY", v, "必须是非负整数（0 表示不裁剪）")
+		} else {
 			c.Storage.RetainHistory = n
 		}
 	}
 	if v := os.Getenv("BEIAN2API_RETAIN_HISTORY_TOTAL"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		if n, err := strconv.Atoi(v); err != nil || n < 0 {
+			c.envErr("BEIAN2API_RETAIN_HISTORY_TOTAL", v, "必须是非负整数（0 表示不裁剪）")
+		} else {
 			c.Storage.RetainHistoryTotal = n
 		}
 	}
+	// TTL / 负缓存 / 回退窗口都走同一个时长解析：`BEIAN2API_TTL=6h` 与
+	// config.yaml 里的 `ttl: 6h` 必须是同一个值。
+	//
+	// 之前这里只认整数秒：同一个 6h，写进 yaml 生效（第十六轮刚修的），
+	// 写进环境变量却被 `strconv.Atoi` 判错、然后**静默忽略**——服务照常起来，
+	// 缓存 TTL 停在默认的 6 小时。配的人以为改过了，而改的和没改一样。
 	if v := os.Getenv("BEIAN2API_TTL"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Cache.TTL = Seconds(n)
-		}
+		c.setEnvDuration("BEIAN2API_TTL", v, &c.Cache.TTL)
 	}
+	if v := os.Getenv("BEIAN2API_NEGATIVE_TTL"); v != "" {
+		c.setEnvDuration("BEIAN2API_NEGATIVE_TTL", v, &c.Cache.Negative)
+	}
+	if v := os.Getenv("BEIAN2API_STALE_MAX"); v != "" {
+		c.setEnvDuration("BEIAN2API_STALE_MAX", v, &c.Cache.StaleMax)
+	}
+}
+
+// envErr 记下一个「环境变量写了但用不了」的错误。
+//
+// 环境变量的坏值和配置文件的坏值必须一样吵。配置里写 `ttl: 6hours` 会直接
+// 拒绝启动（解析失败），而环境变量写 `BEIAN2API_TTL=6hours` 之前是静默忽略：
+// 服务起来了，用的是默认值，日志里一个字都没有。容器部署里最容易踩——
+// 你在 compose 里改了那一行，重启，然后一切"正常"，只是没生效。
+func (c *Config) envErr(key, value, want string) {
+	c.envErrs = append(c.envErrs, fmt.Errorf("环境变量 %s=%q 无法识别：%s", key, value, want))
+}
+
+// setEnvDuration 解析一个时长型环境变量并写回。
+func (c *Config) setEnvDuration(key, value string, dst *Seconds) {
+	sec, err := parseSecondsLoose(value)
+	if err != nil {
+		c.envErr(key, value, "写整数秒（600）或带单位（10m、6h、7d）")
+		return
+	}
+	*dst = sec
+}
+
+// parseSecondsLoose 把「纯数字秒」或「带单位时长」都解析成 Seconds。
+//
+// 纯数字必须先走 Atoi：`time.ParseDuration("90")` 会报错（缺单位），
+// 而 `90` 在这套配置里的历史含义就是 90 秒——yaml 那边也是这么认的。
+func parseSecondsLoose(raw string) (Seconds, error) {
+	raw = strings.TrimSpace(raw)
+	if n, err := strconv.Atoi(raw); err == nil {
+		return Seconds(n), nil
+	}
+	d, err := parseDurationLoose(raw)
+	if err != nil {
+		return 0, err
+	}
+	return Seconds(d / time.Second), nil
 }
 
 func truthyEnv(v string) bool {
@@ -394,6 +458,15 @@ func eventNames() []string {
 
 // Validate 做基本校验并补齐依赖默认值。
 func (c *Config) Validate() error {
+	// 环境变量里的坏值最先报：后面的默认值回填会把它们掩盖掉
+	// （比如 interval 写错被当成 0，紧接着被填成默认的 24 小时）。
+	if len(c.envErrs) > 0 {
+		msgs := make([]string, 0, len(c.envErrs))
+		for _, e := range c.envErrs {
+			msgs = append(msgs, e.Error())
+		}
+		return errors.New(strings.Join(msgs, "；"))
+	}
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}

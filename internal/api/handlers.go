@@ -24,15 +24,31 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 GET / POST")
 		return
 	}
-	var domain string
-	var refresh bool
-	if r.Method == http.MethodGet {
-		domain = r.URL.Query().Get("domain")
+	// domain / refresh 在 query 与 body 两处都认，不是只认一个。
+	//
+	// 文档的参数表写的是「位置：query / body」，所以
+	// `POST /api/v1/query?refresh=1 -d '{"domain":"x"}'` 是在文档承诺范围内的
+	// 写法。之前 POST 分支完全不读 URL：refresh 静默失效（调用方以为在强制
+	// 回源，实际拿到缓存里那份旧数据），而 `?refresh=abc` 连 400 都不给——
+	// 同一批接口里 GET 会 400，只因为换了请求方法就变成「装作没看见」。
+	//
+	// 两处都给时以 body 为准（body 更具体），URL 只作为回落，
+	// 因此老调用方（只传 body）行为不变。
+	qDomain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	qRefreshRaw := r.URL.Query().Get("refresh")
+	qRefresh := false
+	if qRefreshRaw != "" || r.Method == http.MethodGet {
 		var rerr error
-		if refresh, rerr = parseBoolParam(r.URL.Query().Get("refresh")); rerr != nil {
+		if qRefresh, rerr = parseBoolParam(qRefreshRaw); rerr != nil {
 			writeErr(w, http.StatusBadRequest, "invalid_refresh", rerr.Error())
 			return
 		}
+	}
+
+	var domain string
+	var refresh bool
+	if r.Method == http.MethodGet {
+		domain, refresh = qDomain, qRefresh
 	} else {
 		var body struct {
 			Domain  string `json:"domain"`
@@ -43,6 +59,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		domain, refresh = body.Domain, body.Refresh
+		if domain == "" {
+			domain = qDomain
+		}
+		if !refresh {
+			refresh = qRefresh
+		}
 	}
 	if strings.TrimSpace(domain) == "" {
 		writeErr(w, http.StatusBadRequest, "missing_domain", "缺少 domain 参数")
@@ -58,15 +80,23 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 // handleBatch 处理批量查询，支持 GET 逗号分隔与 POST JSON 数组。
 func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
-	var domains []string
-	var refresh bool
-	if r.Method == http.MethodGet {
-		domains = strings.Split(r.URL.Query().Get("domains"), ",")
+	// 与 /api/v1/query 同一套规则：query 与 body 都认，body 优先，
+	// 且 refresh 写错一律 400。文档的参数表就是「位置：query / body」。
+	qDomains := strings.Split(r.URL.Query().Get("domains"), ",")
+	qRefreshRaw := r.URL.Query().Get("refresh")
+	qRefresh := false
+	if qRefreshRaw != "" || r.Method == http.MethodGet {
 		var rerr error
-		if refresh, rerr = parseBoolParam(r.URL.Query().Get("refresh")); rerr != nil {
+		if qRefresh, rerr = parseBoolParam(qRefreshRaw); rerr != nil {
 			writeErr(w, http.StatusBadRequest, "invalid_refresh", rerr.Error())
 			return
 		}
+	}
+
+	var domains []string
+	var refresh bool
+	if r.Method == http.MethodGet {
+		domains, refresh = qDomains, qRefresh
 	} else if r.Method == http.MethodPost {
 		var body struct {
 			Domains []string `json:"domains"`
@@ -77,6 +107,12 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		domains, refresh = body.Domains, body.Refresh
+		if len(domains) == 0 {
+			domains = qDomains
+		}
+		if !refresh {
+			refresh = qRefresh
+		}
 	} else {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 GET / POST")
 		return

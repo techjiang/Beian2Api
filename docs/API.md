@@ -41,6 +41,12 @@ HTTP 状态码同时反映结果：`200` 成功，`400` 参数错误，`401` 缺
 | domain | query / body | 是 | 域名。可带协议、路径、端口、`www.`，服务端会归一化 |
 | refresh | query / body | 否 | `1`/`true`/`yes`/`on` 时跳过缓存强制回源；其余取值返回 400 |
 
+两个参数在 **GET 和 POST 上都认**，query 与 body 两处都给时以 **body** 为准
+（body 更具体，老调用方只传 body 时行为不变）。`POST /api/v1/query?refresh=1
+-d '{"domain":"x"}'` 是在这张表承诺范围内的写法，它曾经不生效：POST 分支
+完全不读 URL，于是 `refresh` 静默失效（以为在强制回源、实际读的是缓存），
+`?refresh=abc` 也不报错——同一批接口里 GET 会 400，只因为换了请求方法就成了例外。
+
 **`refresh` 写错会报错，不会静默当成 false。** 空串表示没传（取 false），
 除此之外只认真/假两类写法（`1/0`、`true/false`、`yes/no`、`y/n`、`on/off`），
 其余返回 `400 invalid_refresh`。之前 `refresh=abc` 被当成「不刷新」：调用方
@@ -130,6 +136,9 @@ curl -X POST "http://localhost:8080/api/v1/batch" \
 ```
 
 单项失败不影响其他项，错误落在该条的 `error` 字段里。
+
+`domains` / `refresh` 与 `/api/v1/query` 同一套规则：GET 与 POST 都认 query 参数，
+两处都给时 body 优先，`refresh` 写错一律 400。
 
 ---
 

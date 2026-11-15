@@ -280,7 +280,9 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_DATA_DIR` | `./data` | 数据目录 |
 | `BEIAN2API_API_KEYS` | 空 | 启用鉴权的 Key，逗号分隔 |
 | `BEIAN2API_PROVIDERS` | `miit:1,apihz:.4` | 数据源与权重（权重高的先起跑，0 即禁用）。只决定「启用哪些、权重多少」，**不动配置文件里各源的 `timeout` / `id` / `key`** |
-| `BEIAN2API_TTL` | `21600` | 缓存秒数 |
+| `BEIAN2API_TTL` | `21600` | 已备案结果缓存时长，支持 `10m` / `6h` / `7d` / 秒数 |
+| `BEIAN2API_NEGATIVE_TTL` | `600` | 未备案结果的负缓存时长，写法同上 |
+| `BEIAN2API_STALE_MAX` | `604800` | 上游全挂时最多回退多久内的旧快照，写法同上 |
 | `BEIAN2API_WEBHOOK` | 空 | 变更推送地址（单通道，等价于一个 generic 通道） |
 | `BEIAN2API_NOTIFY_CHANNELS` | 空 | 多通道推送，形如 `dingtalk:<url>,wecom:<url>` |
 | `BEIAN2API_WATCH_INTERVAL` | `86400` | 巡检间隔，支持 `30m` / `6h` / 秒数 |
@@ -292,9 +294,14 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_RETAIN_HISTORY_TOTAL` | `20000` | 历史快照的全局条数上限（跨所有域名） |
 | `BEIAN2API_APIHZ_ID` / `BEIAN2API_APIHZ_KEY` | 空 | apihz 的自有凭据，不填则用公共测试凭据 |
 
-配置文件里的时长（`cache.ttl`、`cache.negative`、`cache.stale_max`、`watch.interval`）
-也接受带单位的写法：`6h` / `10m` / `7d`，与纯秒数等价。写错单位（`6hours`）会直接
-拒绝启动并指出是哪一个值——静默变成 0 才是最坏的结果，那种错在配置上完全看不出来。
+时长型配置（`cache.ttl`、`cache.negative`、`cache.stale_max`、`watch.interval`）
+**在配置文件和环境变量里是同一套写法**：`6h` / `10m` / `7d` / 纯秒数，三者等价。
+写错（`6hours`）会直接拒绝启动并指出是哪一个值。
+
+这一条对**环境变量**同样成立。它曾经不是：`BEIAN2API_TTL=6h` 解析失败后被静默
+忽略，服务照常起来、TTL 停在默认的 6 小时，而 `BEIAN2API_TTL=1h` 和完全没设
+效果一样——定时重启的容器里最容易踩，改一行、重启、一切看着正常，就是没生效。
+现在环境变量里的坏值会和配置文件里的坏值一样吵，一次报全所有出错的那个变量。
 
 ### 开启鉴权
 

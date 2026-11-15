@@ -17,6 +17,7 @@ trust_proxy: false
 
 # 时长可以写整数秒（600），也可以写带单位的时间（10m、6h、7d）。
 # 两种写法等价：cache.ttl: 6h 与 cache.ttl: 21600 是同一个值。
+# 环境变量里的同名项（BEIAN2API_TTL 等）也认这套写法，写错会拒绝启动。
 cache:
   ttl: 6h              # 已备案结果缓存
   negative: 10m        # 未备案结果缓存
