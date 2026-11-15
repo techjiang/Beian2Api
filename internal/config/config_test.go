@@ -409,3 +409,63 @@ func TestWatchEnabledEnvAcceptsCommonSpellings(t *testing.T) {
 		}
 	}
 }
+
+// `beian2api config` 的输出常被贴进工单和 CI 日志，里面不能有明文密钥。
+// 这条命令的用途恰恰是「确认我配的生效没」，所以也不能整段隐去——
+// 要留得下「配了」「配的是哪一把」的判断依据。
+func TestDumpMasksSecrets(t *testing.T) {
+	c := Default()
+	c.Auth.Enabled = true
+	c.Auth.Keys = []string{"bk_live_SECRET_9f8e7d6c", "short"}
+	c.Providers = []Provider{{
+		Name: "apihz", Enabled: true, Weight: 40, Timeout: 8,
+		ID: "my-real-id", Key: "my-real-key", HasCredential: true,
+	}}
+	b, err := c.Dump()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, secret := range []string{"SECRET", "9f8e7d6c", "my-real-id", "my-real-key", "short"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("配置输出泄露了 %q:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "bk_l******") {
+		t.Fatalf("应保留可辨认的前缀:\n%s", out)
+	}
+	if !strings.Contains(out, "my-r******") {
+		t.Fatalf("上游凭据也应脱敏:\n%s", out)
+	}
+	// 原始配置不能被就地改写：Dump 只是打印，不能有副作用
+	if c.Auth.Keys[0] != "bk_live_SECRET_9f8e7d6c" || c.Providers[0].Key != "my-real-key" {
+		t.Fatal("Dump 不应修改原配置")
+	}
+}
+
+// 推送地址本身也是凭据：钉钉/飞书/企业微信的 webhook 里就带着 access_token。
+// 脱敏要留下「发到哪个平台」这个可辨认信息，砍掉路径与 query。
+func TestDumpMasksNotifyURL(t *testing.T) {
+	c := Default()
+	c.Notify.Channels = []NotifyChannel{{
+		Name: "钉钉告警", Kind: "dingtalk",
+		URL:    "https://oapi.dingtalk.com/robot/send?access_token=SECRETTOKEN123456",
+		Secret: "SECabc123456789",
+	}}
+	b, err := c.Dump()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	for _, leak := range []string{"SECRETTOKEN123456", "SECabc123456789", "/robot/send"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("配置输出泄露了 %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "https://oapi.dingtalk.com/***") {
+		t.Fatalf("应保留主机名用于辨认:\n%s", out)
+	}
+	if c.Notify.Channels[0].URL == "" || c.Notify.Channels[0].Secret != "SECabc123456789" {
+		t.Fatal("Dump 不应修改原配置")
+	}
+}

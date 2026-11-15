@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -620,7 +621,72 @@ func (c *Config) EnabledProviders() []string {
 }
 
 // Dump 把当前配置序列化成 YAML，供 `beian2api config` 输出。
-func (c *Config) Dump() ([]byte, error) { return yaml.Marshal(c) }
+//
+// 输出里不带任何明文密钥：这条命令最常被用来确认「我配的东西到底生效没」，
+// 于是它的输出会被贴进工单、聊天记录、CI 日志。API Key 和上游凭据在这里
+// 只保留可辨认的前缀，正文打码——看得出「配了」「配的是哪一把」就够了。
+func (c *Config) Dump() ([]byte, error) {
+	clone := *c
+	if len(clone.Auth.Keys) > 0 {
+		keys := make([]string, len(clone.Auth.Keys))
+		for i, k := range clone.Auth.Keys {
+			keys[i] = maskSecret(k)
+		}
+		clone.Auth.Keys = keys
+	}
+	if len(clone.Providers) > 0 {
+		ps := make([]Provider, len(clone.Providers))
+		copy(ps, clone.Providers)
+		for i := range ps {
+			if ps[i].ID != "" {
+				ps[i].ID = maskSecret(ps[i].ID)
+			}
+			if ps[i].Key != "" {
+				ps[i].Key = maskSecret(ps[i].Key)
+			}
+		}
+		clone.Providers = ps
+	}
+	if len(clone.Notify.Channels) > 0 {
+		chans := make([]NotifyChannel, len(clone.Notify.Channels))
+		copy(chans, clone.Notify.Channels)
+		for i := range chans {
+			// 钉钉/飞书/企业微信的 webhook 地址里就带着 access_token，
+			// URL 本身就是凭据，和 Secret 一样不能明文出现在输出里。
+			chans[i].URL = maskURL(chans[i].URL)
+			if chans[i].Secret != "" {
+				chans[i].Secret = maskSecret(chans[i].Secret)
+			}
+		}
+		clone.Notify.Channels = chans
+	}
+	return yaml.Marshal(&clone)
+}
+
+// maskURL 保留主机名，把路径与 query 打码。
+// 推送地址的可辨认部分是「发到哪个平台」，敏感的 access_token 都在路径/query 里。
+func maskURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return maskSecret(raw)
+	}
+	return u.Scheme + "://" + u.Host + "/***"
+}
+
+// maskSecret 保留前 4 个字符用于辨认，其余打码；太短的整体打码。
+func maskSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= 4 {
+		return strings.Repeat("*", len(r))
+	}
+	return string(r[:4]) + strings.Repeat("*", 6)
+}
 
 // WatchInterval 返回监控间隔。
 func (c *Config) WatchInterval() time.Duration {

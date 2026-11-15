@@ -28,5 +28,9 @@ for t in "${targets[@]}"; do
     go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/$name$ext" .
 done
 
+# 校验和跟产物一起出：下载页与升级脚本都靠它对账，分两步做迟早会漏。
+( cd "$OUT" && sha256sum * > SHA256SUMS )
 echo
 ls -lh "$OUT"
+echo
+cat "$OUT/SHA256SUMS"
