@@ -177,7 +177,7 @@ func bootstrap(configPath string) (*config.Config, *store.Store, error) {
 	}
 	st.WithRetention(cfg.Storage.RetainChanges, cfg.Storage.RetainHistory).
 		WithHistoryTotal(cfg.Storage.RetainHistoryTotal).
-		WithStaleWindow(cfg.Cache.StaleMax)
+		WithStaleWindow(int(cfg.Cache.StaleMax))
 	return cfg, st, nil
 }
 

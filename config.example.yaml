@@ -15,10 +15,12 @@ base_url: ""           # 对外访问地址，用于生成 OpenAPI 里的 server
 # 就是这么做的，直接用它即可。
 trust_proxy: false
 
+# 时长可以写整数秒（600），也可以写带单位的时间（10m、6h、7d）。
+# 两种写法等价：cache.ttl: 6h 与 cache.ttl: 21600 是同一个值。
 cache:
-  ttl: 21600           # 已备案结果缓存 6 小时
-  negative: 600        # 未备案结果缓存 10 分钟
-  stale_max: 604800    # 上游全挂时，最多回退 7 天内的旧快照
+  ttl: 6h              # 已备案结果缓存
+  negative: 10m        # 未备案结果缓存
+  stale_max: 7d        # 上游全挂时，最多回退这么久内的旧快照
 
 rate_limit:
   enabled: true        # 每 IP 令牌桶
@@ -75,7 +77,7 @@ providers:
 
 watch:
   enabled: true
-  interval: 86400      # 每 24 小时巡检一次
+  interval: 24h        # 巡检间隔，也可写 6h / 90m / 86400
   workers: 4
   fail_threshold: 3    # 连续几轮回源失败才推送一次告警（1 会被偶发抖动刷屏）
   webhook: ""          # 旧字段，等价于一个 generic 通道；多渠道请用下面的 notify

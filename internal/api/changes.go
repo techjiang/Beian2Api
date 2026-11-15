@@ -176,10 +176,29 @@ func (s *Server) handleRSS(w http.ResponseWriter, r *http.Request) {
 		base = scheme + "://" + r.Host
 	}
 
+	// kind 与 /api/v1/changes 用同一套语义。
+	//
+	// 之前这个接口根本没收 kind 参数：`?kind=revoked` 返回 200 和整条流水，
+	// 一条都没筛。订阅「只看注销」的人以为自己盯上的是注销，实际收到的是
+	// 全部事件——而 RSS 的消费方不会去核对内容，它只会照单全收。
+	// 写错取值也不报错，这一点比 /api/v1/changes 更糟：那边至少会 400。
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	if kind != "" && !knownKind(kind) {
+		writeErr(w, http.StatusBadRequest, "invalid_kind",
+			fmt.Sprintf("kind 只能是 changed / revoked / registered / upstream_error / recovered，收到 %q", kind))
+		return
+	}
+
 	var items []watch.Change
 	_ = s.svc.Store().ListChanges(100, func(raw []byte) (bool, error) {
 		var c watch.Change
 		if json.Unmarshal(raw, &c) != nil {
+			return false, nil
+		}
+		if kind != "" && c.Kind != kind {
+			// 不收也不占名额：ListChanges 的 limit 数的是「被保留的条数」，
+			// 过滤发生在截断之前。否则「只看注销」时前 100 条里没有注销，
+			// feed 就是空的——而库里明明有。
 			return false, nil
 		}
 		items = append(items, c)

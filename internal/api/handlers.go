@@ -119,10 +119,24 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_limit", err.Error())
 		return
 	}
+	// 多取一条只为「算第一条的 diff」，随后丢掉。
+	//
+	// 之前直接按 limit 取、再在结果里相邻相减：于是带上 limit 时，
+	// 返回的第一条永远没有 diff——哪怕它前面确实还有一次变更。
+	// 那条记录看起来像「从未变过」，而它恰恰是变过的那一条。
+	// 分页取值不该改变单条记录的含义。
 	recs, err := s.svc.History(domain, limit)
 	if err != nil {
 		s.writeServiceErr(w, err)
 		return
+	}
+	var prevOf *model.Record
+	if limit > 0 && len(recs) == limit {
+		// 这一页可能不是从最旧的一条开始：多要一条，只拿它当第一条的对照组。
+		if wider, werr := s.svc.History(domain, limit+1); werr == nil && len(wider) == limit+1 {
+			prevOf = &wider[0]
+			recs = wider[1:]
+		}
 	}
 	type node struct {
 		Record model.Record          `json:"record"`
@@ -133,6 +147,8 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		n := node{Record: recs[i]}
 		if i > 0 {
 			n.Diff = service.DiffRecords(&recs[i-1], &recs[i])
+		} else if prevOf != nil {
+			n.Diff = service.DiffRecords(prevOf, &recs[i])
 		}
 		out = append(out, n)
 	}
@@ -197,16 +213,35 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		}
 		writeOK(w, map[string]any{"domain": d, "watching": true, "baseline_icp": baseline})
 	case http.MethodDelete:
-		d := model.CanonicalDomain(r.URL.Query().Get("domain"))
-		if d == "" {
+		raw := strings.TrimSpace(r.URL.Query().Get("domain"))
+		if raw == "" {
 			writeErr(w, http.StatusBadRequest, "missing_domain", "缺少 domain 参数")
 			return
 		}
-		if err := s.svc.Store().DeleteWatch(d); err != nil {
+		d := model.CanonicalDomain(raw)
+		// 移出也要校验域名。之前只判「归一化后非空」，于是
+		// `?domain=<script>` 这种根本不可能被加入监控的值照样回
+		// {"watching":false}——一个「成功」的形状，背后什么都没做。
+		// 批量移出早就如实报 missing 了（`DeleteWatchIfExists`），
+		// 单个接口没道理继续敷衍。
+		if !model.IsValidDomain(d) {
+			writeErr(w, http.StatusBadRequest, "invalid_domain", "域名格式不正确，示例：example.com")
+			return
+		}
+		existed, err := s.svc.Store().DeleteWatchIfExists(d)
+		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
-		writeOK(w, map[string]any{"domain": d, "watching": false})
+		if !existed {
+			// 不在列表里不算成功：移出是「让某个域名不再被巡检」的动作，
+			// 它本来就不在，那就什么都没发生。回 404 而不是 200，
+			// 是为了让「我以为它还在被盯着」这件事当场露出来。
+			// （首页的移出按钮点的是列表里的行，不会踩到这里。）
+			writeErr(w, http.StatusNotFound, "not_watching", d+" 不在监控列表里，无需移出")
+			return
+		}
+		writeOK(w, map[string]any{"domain": d, "watching": false, "removed": true})
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 POST / DELETE")
 	}

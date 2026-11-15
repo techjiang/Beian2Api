@@ -292,6 +292,10 @@ cp config.example.yaml config.yaml
 | `BEIAN2API_RETAIN_HISTORY_TOTAL` | `20000` | 历史快照的全局条数上限（跨所有域名） |
 | `BEIAN2API_APIHZ_ID` / `BEIAN2API_APIHZ_KEY` | 空 | apihz 的自有凭据，不填则用公共测试凭据 |
 
+配置文件里的时长（`cache.ttl`、`cache.negative`、`cache.stale_max`、`watch.interval`）
+也接受带单位的写法：`6h` / `10m` / `7d`，与纯秒数等价。写错单位（`6hours`）会直接
+拒绝启动并指出是哪一个值——静默变成 0 才是最坏的结果，那种错在配置上完全看不出来。
+
 ### 开启鉴权
 
 ```yaml

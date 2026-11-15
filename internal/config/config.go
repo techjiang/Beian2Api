@@ -13,6 +13,68 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Seconds 是「以秒为单位、但可以写成 6h / 30m / 90」的时长配置值。
+//
+// 为什么需要它：README 教人用 BEIAN2API_WATCH_INTERVAL=6h，环境变量那条路
+// 认时间写法；而 YAML 里的 interval / cache.ttl 只认整数秒。于是把同样的
+// 6h 写进 config.yaml，服务直接起不来，报一句
+// `cannot unmarshal !!str `6h` into int`——同一套配置，两种写法，一种能用。
+// 配时长时写 6h 是最自然的手感，这里让它成立。
+type Seconds int
+
+// UnmarshalYAML 同时接受整数秒与带单位的时间串。
+//
+// 带单位时走 time.ParseDuration（6h / 30m / 1h30m），
+// 纯数字仍然按秒，和旧配置、环境变量、文档保持一致。
+// 写错时报错要指到具体键上：`cache.ttl` 里写了个 6h 却不生效，
+// 比直接拒绝更糟——缓存的过期时间会静默变成别的数。
+func (s *Seconds) UnmarshalYAML(node *yaml.Node) error {
+	var raw string
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		*s = 0
+		return nil
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		*s = Seconds(n)
+		return nil
+	}
+	d, err := parseDurationLoose(raw)
+	if err != nil {
+		return fmt.Errorf("%q 不是合法时长：写整数秒（600）或带单位（10m、6h、7d）", raw)
+	}
+	*s = Seconds(d / time.Second)
+	return nil
+}
+
+// parseDurationLoose 在 time.ParseDuration 之上补一个 `d`（天）单位。
+//
+// 缓存回退窗口默认是 7 天，写 168h 能算出同样的值，但没人会那样想，
+// 而写 7d 会被标准库拒绝（它只认到小时）。这类配置项的语义单位本来就是
+// 「天」，多认一个 d 比让人对着 168h 做换算更实在。
+func parseDurationLoose(raw string) (time.Duration, error) {
+	s := strings.TrimSpace(raw)
+	if strings.HasSuffix(s, "d") {
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(s, "d"), 64); err == nil {
+			if n < 0 {
+				return 0, fmt.Errorf("%q 是负数", raw)
+			}
+			return time.Duration(n * float64(24*time.Hour)), nil
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%q 是负数", raw)
+	}
+	return d, nil
+}
+
 // Provider 描述一个上游数据源的开关与权重。
 type Provider struct {
 	Name    string `yaml:"name" json:"name"`
@@ -42,9 +104,9 @@ type Config struct {
 	TrustProxy bool `yaml:"trust_proxy" json:"trust_proxy"`
 
 	Cache struct {
-		TTL      int `yaml:"ttl" json:"ttl"`             // 命中缓存有效期（秒）
-		Negative int `yaml:"negative" json:"negative"`   // 未备案结果缓存（秒）
-		StaleMax int `yaml:"stale_max" json:"stale_max"` // 允许回退的陈旧数据上限（秒）
+		TTL      Seconds `yaml:"ttl" json:"ttl"`             // 命中缓存有效期
+		Negative Seconds `yaml:"negative" json:"negative"`   // 未备案结果缓存
+		StaleMax Seconds `yaml:"stale_max" json:"stale_max"` // 允许回退的陈旧数据上限
 	} `yaml:"cache" json:"cache"`
 
 	RateLimit struct {
@@ -61,9 +123,9 @@ type Config struct {
 	Providers []Provider `yaml:"providers" json:"providers"`
 
 	Watch struct {
-		Enabled  bool `yaml:"enabled" json:"enabled"`
-		Interval int  `yaml:"interval" json:"interval"` // 秒
-		Workers  int  `yaml:"workers" json:"workers"`
+		Enabled  bool    `yaml:"enabled" json:"enabled"`
+		Interval Seconds `yaml:"interval" json:"interval"` // 巡检间隔
+		Workers  int     `yaml:"workers" json:"workers"`
 		// FailThreshold 是「连续几轮回源失败才推送告警」，1 会被偶发抖动刷屏。
 		FailThreshold int    `yaml:"fail_threshold" json:"fail_threshold"`
 		Webhook       string `yaml:"webhook" json:"webhook"` // 兼容旧配置，等价于一个 generic 通道
@@ -210,9 +272,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("BEIAN2API_WATCH_INTERVAL"); v != "" {
 		// 支持 "6h" / "30m" / "86400" 三种写法，容器里配一行就够。
 		if n, err := strconv.Atoi(v); err == nil {
-			c.Watch.Interval = n
+			c.Watch.Interval = Seconds(n)
 		} else if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			c.Watch.Interval = int(d / time.Second)
+			c.Watch.Interval = Seconds(d / time.Second)
 		}
 	}
 	if v := os.Getenv("BEIAN2API_WATCH_FAIL_THRESHOLD"); v != "" {
@@ -243,7 +305,7 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("BEIAN2API_TTL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			c.Cache.TTL = n
+			c.Cache.TTL = Seconds(n)
 		}
 	}
 }
@@ -488,4 +550,6 @@ func (c *Config) EnabledProviders() []string {
 func (c *Config) Dump() ([]byte, error) { return yaml.Marshal(c) }
 
 // WatchInterval 返回监控间隔。
-func (c *Config) WatchInterval() time.Duration { return time.Duration(c.Watch.Interval) * time.Second }
+func (c *Config) WatchInterval() time.Duration {
+	return time.Duration(c.Watch.Interval) * time.Second
+}

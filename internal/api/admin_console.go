@@ -462,7 +462,21 @@ func (s *Server) handleAdminWatchBulk(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(missing)
 
 	// 全失败时别回 200 + 空列表：那看起来像「成功了，只是没加进去」。
+	//
+	// 但「移出」这一支不涉及上游——它只是删本地记录。之前它在「全部域名
+	// 都不在列表里」时也回 502 `请检查上游连通性后重试`，而这句话对删操作
+	// 完全是误导：用户会去查数据源，而上游与这件事一点关系都没有。
+	// 那种情况并不是失败，是「你要移出的东西本来就不在」，如实回 200 +
+	// missing 列表，让调用方自己决定要不要提示。
 	if len(clean) > 0 && len(ok) == 0 {
+		if action == "remove" && len(bad) == 0 {
+			writeOK(w, map[string]any{
+				"action": action, "added": 0, "failed": 0,
+				"duplicated": dup, "ok": []string{}, "invalid": nil,
+				"missing": missing,
+			})
+			return
+		}
 		writeErr(w, http.StatusBadGateway, "bulk_failed",
 			"全部域名都没处理成功，请检查上游连通性后重试")
 		return

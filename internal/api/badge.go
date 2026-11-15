@@ -13,10 +13,19 @@ import (
 // 纯矢量、按内容自适应宽度、带缓存头，零外部依赖。
 func (s *Server) handleBadge(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
-	label := r.URL.Query().Get("label")
+	label := strings.TrimSpace(r.URL.Query().Get("label"))
 	if label == "" {
 		label = "ICP"
 	}
+	// 标签长度封顶。
+	//
+	// 徽章是公开接口（README 里的 <img> 带不了请求头），而 label 由 URL 决定。
+	// 不封顶时 `?label=5000 个字符` 会生成一个三万多像素宽、20KB 的 SVG——
+	// 一次请求就能让别人家的 README 页面横向滚到天边，而这张图还是从你的
+	// 服务器上吐出去的。徽章本来只放得下一两个词（「ICP」「备案」），
+	// 24 个字符足够任何真实用法，超出的部分截断并加省略号，
+	// 而不是把宽度算到离谱。
+	label = clip(label, 24)
 	if domain == "" {
 		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
@@ -102,6 +111,24 @@ func badgeSVG(label, value, color string) string {
 		total, lw, lw, vw, color, total,
 		lw/2, esc(label), lw/2, esc(label),
 		lw+vw/2, esc(value), lw+vw/2, esc(value))
+}
+
+// clip 按字符（不是字节）截断过长的文本，截断处补省略号。
+//
+// 按 rune 是为了不把「备案」这种多字节字符劈成半个——那会渲染成一个
+// 替换字符，看着像字体坏了或者编码错了，而原因只是截断位置不对。
+func clip(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	n := 0
+	for i := range s {
+		if n == max {
+			return s[:i] + "…"
+		}
+		n++
+	}
+	return s
 }
 
 func esc(s string) string {
